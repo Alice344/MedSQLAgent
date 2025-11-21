@@ -1,8 +1,10 @@
 from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.engine import URL
 import pandas as pd
 from typing import List, Dict, Any, Optional
 from urllib.parse import quote_plus
+import pyodbc
 from config.database import DatabaseConfig
 
 class DatabaseConnector:
@@ -11,7 +13,8 @@ class DatabaseConnector:
     def __init__(self, connection_string: Optional[str] = None, db_type: Optional[str] = None, 
                  host: Optional[str] = None, port: Optional[int] = None, 
                  user: Optional[str] = None, password: Optional[str] = None, 
-                 database: Optional[str] = None, driver: Optional[str] = None):
+                 database: Optional[str] = None, driver: Optional[str] = None,
+                 use_azure_ad: bool = False):
         """
         Initialize database connector with optional custom connection parameters
         
@@ -24,28 +27,38 @@ class DatabaseConnector:
             password: Database password
             database: Database name
             driver: ODBC driver name (for SQL Server/Caboodle)
+            use_azure_ad: Use Azure AD Interactive authentication (for Caboodle)
         """
         self.engine = None
+        self.use_azure_ad = use_azure_ad
+        self.pyodbc_conn = None
+        
         if connection_string:
             self.connection_string = connection_string
         else:
             self.connection_string = self._build_connection_string(
-                db_type, host, port, user, password, database, driver
+                db_type, host, port, user, password, database, driver, use_azure_ad
             )
         self._connect()
     
     def _build_connection_string(self, db_type: Optional[str], host: Optional[str], 
                                  port: Optional[int], user: Optional[str], 
                                  password: Optional[str], database: Optional[str],
-                                 driver: Optional[str] = None) -> str:
+                                 driver: Optional[str] = None, use_azure_ad: bool = False) -> str:
         """Build connection string from parameters"""
         if db_type:
             if db_type == 'sqlserver' or db_type == 'caboodle':
-                if driver is None:
-                    driver = DatabaseConfig.SQLSERVER_CONFIG.get('driver', 'ODBC Driver 17 for SQL Server')
-                driver_encoded = quote_plus(driver)
-                password_encoded = quote_plus(password) if password else ''
-                return f"mssql+pyodbc://{user}:{password_encoded}@{host}:{port}/{database}?driver={driver_encoded}"
+                if use_azure_ad:
+                    # For Azure AD, we'll use pyodbc directly, return a placeholder
+                    # The actual connection will be handled in _connect()
+                    return "azure_ad_connection"
+                else:
+                    # Standard SQL Server authentication
+                    if driver is None:
+                        driver = DatabaseConfig.SQLSERVER_CONFIG.get('driver', 'ODBC Driver 17 for SQL Server')
+                    driver_encoded = quote_plus(driver)
+                    password_encoded = quote_plus(password) if password else ''
+                    return f"mssql+pyodbc://{user}:{password_encoded}@{host}:{port}/{database}?driver={driver_encoded}"
             elif db_type == 'mysql':
                 password_encoded = quote_plus(password) if password else ''
                 return f"mysql+pymysql://{user}:{password_encoded}@{host}:{port}/{database}?charset=utf8mb4"
@@ -59,14 +72,66 @@ class DatabaseConnector:
     def _connect(self):
         """Establish database connection"""
         try:
-            self.engine = create_engine(self.connection_string, echo=False)
-            # Test connection
-            with self.engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
+            if self.use_azure_ad and self.connection_string == "azure_ad_connection":
+                # Azure AD Interactive authentication
+                # We need to get connection params from the instance
+                # This will be set up in the Streamlit app
+                raise ValueError("Azure AD connection requires connection parameters")
+            else:
+                self.engine = create_engine(self.connection_string, echo=False)
+                # Test connection
+                with self.engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
             print("✓ Database connected successfully")
         except Exception as e:
             print(f"✗ Database connection failed: {str(e)}")
             raise
+    
+    @staticmethod
+    def create_azure_ad_connection(server: str, database: str, username: str, 
+                                   driver: str = "ODBC Driver 17 for SQL Server"):
+        """
+        Create Azure AD Interactive connection
+        
+        Args:
+            server: Server hostname
+            database: Database name
+            username: Username (for UID)
+            driver: ODBC driver name
+            
+        Returns:
+            DatabaseConnector instance with Azure AD connection
+        """
+        # Build ODBC connection string for Azure AD (same format as user's example)
+        odbc_conn_str = f"""DRIVER={{{driver}}};SERVER={server};DATABASE={database};UID={username};Authentication=ActiveDirectoryInteractive;"""
+        
+        # Create SQLAlchemy connection URL using odbc_connect parameter
+        connection_url = URL.create(
+            "mssql+pyodbc",
+            query={"odbc_connect": odbc_conn_str}
+        )
+        
+        # Create connector instance
+        connector = DatabaseConnector.__new__(DatabaseConnector)
+        
+        # Create engine with a creator function that uses pyodbc directly
+        def create_connection():
+            return pyodbc.connect(odbc_conn_str, autocommit=True)
+        
+        connector.engine = create_engine(
+            connection_url, 
+            creator=create_connection,
+            echo=False
+        )
+        connector.use_azure_ad = True
+        connector.pyodbc_conn = None  # Connection will be created on demand
+        
+        # Test connection
+        with connector.engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        
+        print("✓ Azure AD database connected successfully")
+        return connector
     
     def get_table_names(self) -> List[str]:
         """Get all table names"""

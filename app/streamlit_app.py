@@ -83,17 +83,37 @@ if not st.session_state.logged_in:
     with col1:
         st.subheader("Connection Settings")
         
+        # Initialize use_azure_ad for all database types
+        use_azure_ad = False
+        
         if db_type == "Caboodle (SQL Server)":
+            # Authentication method selection
+            auth_method = st.radio(
+                "Authentication Method",
+                ["Azure AD Interactive (Recommended for Caboodle)", "SQL Server Authentication"],
+                key="caboodle_auth_method"
+            )
+            
             host = st.text_input("Server Host", value="", key="caboodle_host", placeholder="e.g., caboodle.example.com")
-            port = st.number_input("Port", value=1433, min_value=1, max_value=65535, key="caboodle_port")
             database = st.text_input("Database Name", value="", key="caboodle_db", placeholder="Caboodle database name")
-            username = st.text_input("Username", value="", key="caboodle_user")
-            password = st.text_input("Password", type="password", value="", key="caboodle_pass")
             driver = st.selectbox(
                 "ODBC Driver",
                 ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server Native Client 11.0"],
                 key="caboodle_driver"
             )
+            
+            if auth_method == "Azure AD Interactive (Recommended for Caboodle)":
+                username = st.text_input("Username (Email)", value="", key="caboodle_user", 
+                                        placeholder="your.email@domain.com")
+                password = None  # Not needed for Azure AD Interactive
+                port = None  # Not needed for Azure AD
+                use_azure_ad = True
+            else:
+                port = st.number_input("Port", value=1433, min_value=1, max_value=65535, key="caboodle_port")
+                username = st.text_input("Username", value="", key="caboodle_user")
+                password = st.text_input("Password", type="password", value="", key="caboodle_pass")
+                use_azure_ad = False
+            
             db_type_code = "caboodle"
             
         elif db_type == "MySQL":
@@ -136,9 +156,10 @@ if not st.session_state.logged_in:
         if db_type == "Caboodle (SQL Server)":
             st.warning("""
             **Caboodle Connection:**
+            - For Azure AD Interactive: You'll be prompted to authenticate in a browser window
             - Ensure you have the correct ODBC driver installed
-            - Use your Caboodle credentials
             - The system will index all accessible tables after login
+            - Azure AD Interactive is recommended for Caboodle connections
             """)
     
     # Connect button
@@ -148,34 +169,108 @@ if not st.session_state.logged_in:
                 st.error("Please enter database path")
             else:
                 try:
-                    with st.spinner("Connecting to database..."):
+                    with st.spinner("Connecting to database and indexing schemas..."):
                         db = DatabaseConnector(
                             db_type=db_type_code,
                             database=database
                         )
-                        st.session_state.db = db
-                        st.session_state.db_type = db_type_code
-                        st.session_state.logged_in = True
-                        st.success("✅ Connected successfully!")
+                        
+                        # Get all schemas
+                        schemas = db.get_all_schemas()
+                        
+                        if not schemas:
+                            st.warning("⚠️ No tables found in the database")
+                        else:
+                            # Create vector store and index schemas
+                            vector_store = SchemaVectorStore()
+                            vector_store.clear()  # Clear any existing data
+                            vector_store.add_schemas(schemas)
+                            
+                            # Initialize SQL agent
+                            agent = SQLAgent(db=db, vector_store=vector_store, use_vector_search=True)
+                            
+                            st.session_state.db = db
+                            st.session_state.agent = agent
+                            st.session_state.db_type = db_type_code
+                            st.session_state.connection_info = {
+                                'database': database
+                            }
+                            st.session_state.logged_in = True
+                            st.session_state.initialized = True
+                            
+                            st.success(f"✅ Connected successfully! Indexed {len(schemas)} tables.")
+                            st.info(f"📊 Found {len(schemas)} tables. All schemas have been indexed in vector database.")
                 except Exception as e:
                     st.error(f"❌ Connection failed: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
         else:
-            # Validate required fields
-            if not host or not database or not username or not password:
-                st.error("Please fill in all required fields")
+            # Validate required fields based on authentication method
+            if db_type_code == "caboodle" and use_azure_ad:
+                # Azure AD validation
+                if not host or not database or not username:
+                    st.error("Please fill in Server Host, Database Name, and Username")
+                else:
+                    try:
+                        with st.spinner("Connecting to database with Azure AD Interactive authentication...\nYou may be prompted to authenticate in a browser window."):
+                            # Create Azure AD connection
+                            db = DatabaseConnector.create_azure_ad_connection(
+                                server=host,
+                                database=database,
+                                username=username,
+                                driver=driver
+                            )
+                            
+                            # Get all schemas
+                            schemas = db.get_all_schemas()
+                            
+                            if not schemas:
+                                st.warning("⚠️ No tables found in the database")
+                            else:
+                                # Create vector store and index schemas
+                                vector_store = SchemaVectorStore()
+                                vector_store.clear()  # Clear any existing data
+                                vector_store.add_schemas(schemas)
+                                
+                                # Initialize SQL agent
+                                agent = SQLAgent(db=db, vector_store=vector_store, use_vector_search=True)
+                                
+                                st.session_state.db = db
+                                st.session_state.agent = agent
+                                st.session_state.db_type = db_type_code
+                                st.session_state.connection_info = {
+                                    'host': host,
+                                    'database': database,
+                                    'username': username,
+                                    'auth_method': 'Azure AD Interactive'
+                                }
+                                st.session_state.logged_in = True
+                                st.session_state.initialized = True
+                                
+                                st.success(f"✅ Connected successfully! Indexed {len(schemas)} tables.")
+                                st.info(f"📊 Found {len(schemas)} tables. All schemas have been indexed in vector database.")
+                                
+                    except Exception as e:
+                        st.error(f"❌ Connection failed: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
             else:
-                try:
-                    with st.spinner("Connecting to database and indexing schemas..."):
-                        # Create database connection
-                        db = DatabaseConnector(
-                            db_type=db_type_code,
-                            host=host,
-                            port=port,
-                            user=username,
-                            password=password,
-                            database=database,
-                            driver=driver if db_type_code == "caboodle" else None
-                        )
+                # Standard authentication validation
+                if not host or not database or not username or not password:
+                    st.error("Please fill in all required fields")
+                else:
+                    try:
+                        with st.spinner("Connecting to database and indexing schemas..."):
+                            # Create database connection
+                            db = DatabaseConnector(
+                                db_type=db_type_code,
+                                host=host,
+                                port=port,
+                                user=username,
+                                password=password,
+                                database=database,
+                                driver=driver if db_type_code == "caboodle" else None
+                            )
                         
                         # Get all schemas
                         schemas = db.get_all_schemas()
