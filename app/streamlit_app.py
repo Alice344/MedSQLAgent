@@ -300,10 +300,10 @@ if not st.session_state.logged_in:
                             st.success(f"✅ Connected successfully! Indexed {len(schemas)} tables.")
                             st.info(f"📊 Found {len(schemas)} tables. All schemas have been indexed in vector database.")
                             
-                except Exception as e:
-                    st.error(f"❌ Connection failed: {str(e)}")
-                    import traceback
-                    st.code(traceback.format_exc())
+                    except Exception as e:
+                        st.error(f"❌ Connection failed: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
     
     st.stop()
 
