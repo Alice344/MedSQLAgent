@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from agents.sql_agent import SQLAgent
 from utils.db_connector import DatabaseConnector
+from utils.schema_vector_store import SchemaVectorStore
 
 # Page configuration
 st.set_page_config(
@@ -50,20 +51,181 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Initialize session state
-if 'agent' not in st.session_state:
-    try:
-        st.session_state.agent = SQLAgent()
-        st.session_state.db = st.session_state.agent.db
-        st.session_state.initialized = True
-    except Exception as e:
-        st.error(f"Initialization failed: {str(e)}")
-        st.session_state.initialized = False
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.db_type = None
+    st.session_state.connection_info = None
 
 if 'query_history' not in st.session_state:
     st.session_state.query_history = []
 
+if 'agent' not in st.session_state:
+    st.session_state.agent = None
+    st.session_state.db = None
+    st.session_state.initialized = False
+
 # Main header
 st.markdown('<h1 class="main-header">🏥 Medical Database Intelligent Query System</h1>', unsafe_allow_html=True)
+
+# Login page for Caboodle
+if not st.session_state.logged_in:
+    st.markdown("## 🔐 Database Connection")
+    
+    # Database type selection
+    db_type = st.selectbox(
+        "Select Database Type",
+        ["Caboodle (SQL Server)", "MySQL", "PostgreSQL", "SQLite"],
+        key="db_type_select"
+    )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Connection Settings")
+        
+        if db_type == "Caboodle (SQL Server)":
+            host = st.text_input("Server Host", value="", key="caboodle_host", placeholder="e.g., caboodle.example.com")
+            port = st.number_input("Port", value=1433, min_value=1, max_value=65535, key="caboodle_port")
+            database = st.text_input("Database Name", value="", key="caboodle_db", placeholder="Caboodle database name")
+            username = st.text_input("Username", value="", key="caboodle_user")
+            password = st.text_input("Password", type="password", value="", key="caboodle_pass")
+            driver = st.selectbox(
+                "ODBC Driver",
+                ["ODBC Driver 17 for SQL Server", "ODBC Driver 18 for SQL Server", "SQL Server Native Client 11.0"],
+                key="caboodle_driver"
+            )
+            db_type_code = "caboodle"
+            
+        elif db_type == "MySQL":
+            host = st.text_input("Host", value="localhost", key="mysql_host")
+            port = st.number_input("Port", value=3306, min_value=1, max_value=65535, key="mysql_port")
+            database = st.text_input("Database Name", value="hospital_db", key="mysql_db")
+            username = st.text_input("Username", value="root", key="mysql_user")
+            password = st.text_input("Password", type="password", value="", key="mysql_pass")
+            driver = None
+            db_type_code = "mysql"
+            
+        elif db_type == "PostgreSQL":
+            host = st.text_input("Host", value="localhost", key="postgres_host")
+            port = st.number_input("Port", value=5432, min_value=1, max_value=65535, key="postgres_port")
+            database = st.text_input("Database Name", value="hospital_db", key="postgres_db")
+            username = st.text_input("Username", value="postgres", key="postgres_user")
+            password = st.text_input("Password", type="password", value="", key="postgres_pass")
+            driver = None
+            db_type_code = "postgresql"
+            
+        else:  # SQLite
+            database = st.text_input("Database Path", value="./data/hospital.db", key="sqlite_path")
+            host = None
+            port = None
+            username = None
+            password = None
+            driver = None
+            db_type_code = "sqlite"
+    
+    with col2:
+        st.subheader("Connection Info")
+        st.info("""
+        **Instructions:**
+        1. Enter your database connection credentials
+        2. Click 'Connect' to establish connection
+        3. After successful connection, all table schemas will be indexed in vector database
+        4. You can then use natural language to query the database
+        """)
+        
+        if db_type == "Caboodle (SQL Server)":
+            st.warning("""
+            **Caboodle Connection:**
+            - Ensure you have the correct ODBC driver installed
+            - Use your Caboodle credentials
+            - The system will index all accessible tables after login
+            """)
+    
+    # Connect button
+    if st.button("🔌 Connect to Database", type="primary", use_container_width=True):
+        if db_type_code == "sqlite":
+            if not database:
+                st.error("Please enter database path")
+            else:
+                try:
+                    with st.spinner("Connecting to database..."):
+                        db = DatabaseConnector(
+                            db_type=db_type_code,
+                            database=database
+                        )
+                        st.session_state.db = db
+                        st.session_state.db_type = db_type_code
+                        st.session_state.logged_in = True
+                        st.success("✅ Connected successfully!")
+                except Exception as e:
+                    st.error(f"❌ Connection failed: {str(e)}")
+        else:
+            # Validate required fields
+            if not host or not database or not username or not password:
+                st.error("Please fill in all required fields")
+            else:
+                try:
+                    with st.spinner("Connecting to database and indexing schemas..."):
+                        # Create database connection
+                        db = DatabaseConnector(
+                            db_type=db_type_code,
+                            host=host,
+                            port=port,
+                            user=username,
+                            password=password,
+                            database=database,
+                            driver=driver if db_type_code == "caboodle" else None
+                        )
+                        
+                        # Get all schemas
+                        schemas = db.get_all_schemas()
+                        
+                        if not schemas:
+                            st.warning("⚠️ No tables found in the database")
+                        else:
+                            # Create vector store and index schemas
+                            vector_store = SchemaVectorStore()
+                            vector_store.clear()  # Clear any existing data
+                            vector_store.add_schemas(schemas)
+                            
+                            # Initialize SQL agent
+                            agent = SQLAgent(db=db, vector_store=vector_store, use_vector_search=True)
+                            
+                            st.session_state.db = db
+                            st.session_state.agent = agent
+                            st.session_state.db_type = db_type_code
+                            st.session_state.connection_info = {
+                                'host': host,
+                                'database': database,
+                                'username': username
+                            }
+                            st.session_state.logged_in = True
+                            st.session_state.initialized = True
+                            
+                            st.success(f"✅ Connected successfully! Indexed {len(schemas)} tables.")
+                            st.info(f"📊 Found {len(schemas)} tables. All schemas have been indexed in vector database.")
+                            
+                except Exception as e:
+                    st.error(f"❌ Connection failed: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
+    st.stop()
+
+# Initialize agent if not already done
+if st.session_state.logged_in and not st.session_state.initialized:
+    try:
+        if st.session_state.db:
+            vector_store = SchemaVectorStore()
+            schemas = st.session_state.db.get_all_schemas()
+            if schemas:
+                vector_store.clear()
+                vector_store.add_schemas(schemas)
+            st.session_state.agent = SQLAgent(db=st.session_state.db, vector_store=vector_store, use_vector_search=True)
+            st.session_state.initialized = True
+    except Exception as e:
+        st.error(f"Initialization failed: {str(e)}")
+        st.session_state.initialized = False
 
 # Sidebar
 with st.sidebar:
@@ -246,21 +408,45 @@ with tab3:
             tables = st.session_state.db.get_table_names()
             st.metric("Number of Tables", len(tables))
             st.metric("Total Queries", len(st.session_state.query_history))
+            if st.session_state.agent and st.session_state.agent.vector_store:
+                st.metric("Indexed Schemas", len(st.session_state.agent.vector_store.metadata))
     
     with col2:
         st.subheader("🔧 Configuration Info")
-        st.text(f"LLM Provider: {st.session_state.agent.provider}")
-        st.text(f"Model: {st.session_state.agent.model}")
+        if st.session_state.initialized:
+            st.text(f"Database Type: {st.session_state.db_type}")
+            if st.session_state.connection_info:
+                st.text(f"Host: {st.session_state.connection_info.get('host', 'N/A')}")
+                st.text(f"Database: {st.session_state.connection_info.get('database', 'N/A')}")
+            st.text(f"LLM Provider: {st.session_state.agent.provider}")
+            st.text(f"Model: {st.session_state.agent.model}")
+            st.text(f"Vector Search: {'Enabled' if st.session_state.agent.use_vector_search else 'Disabled'}")
     
     st.divider()
     
-    if st.button("🔄 Reconnect Database"):
-        try:
-            st.session_state.agent = SQLAgent()
-            st.session_state.db = st.session_state.agent.db
-            st.success("✅ Reconnected successfully!")
-        except Exception as e:
-            st.error(f"❌ Reconnection failed: {str(e)}")
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        if st.button("🔄 Refresh Schemas"):
+            if st.session_state.initialized:
+                try:
+                    with st.spinner("Refreshing schemas..."):
+                        st.session_state.agent.refresh_schemas()
+                        st.success("✅ Schemas refreshed successfully!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Refresh failed: {str(e)}")
+            else:
+                st.warning("Please connect to database first")
+    
+    with col4:
+        if st.button("🚪 Disconnect"):
+            st.session_state.logged_in = False
+            st.session_state.initialized = False
+            st.session_state.agent = None
+            st.session_state.db = None
+            st.session_state.connection_info = None
+            st.rerun()
 
 # Footer
 st.divider()

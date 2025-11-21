@@ -5,14 +5,26 @@ from openai import OpenAI
 from anthropic import Anthropic
 from config.database import DatabaseConfig
 from utils.db_connector import DatabaseConnector
+from utils.schema_vector_store import SchemaVectorStore
 import pandas as pd
 
 class SQLAgent:
     """Natural language to SQL Agent"""
     
-    def __init__(self):
-        self.db = DatabaseConnector()
+    def __init__(self, db: Optional[DatabaseConnector] = None, 
+                 vector_store: Optional[SchemaVectorStore] = None,
+                 use_vector_search: bool = True):
+        """
+        Initialize SQL Agent
+        
+        Args:
+            db: DatabaseConnector instance (if None, creates new one)
+            vector_store: SchemaVectorStore instance (if None, creates new one)
+            use_vector_search: Whether to use vector search for schema retrieval
+        """
+        self.db = db if db else DatabaseConnector()
         self.provider = DatabaseConfig.LLM_PROVIDER
+        self.use_vector_search = use_vector_search
         
         # Initialize LLM client
         if self.provider == 'openai':
@@ -24,12 +36,40 @@ class SQLAgent:
         elif self.provider == 'ollama':
             self.model = DatabaseConfig.MODEL_NAME  # e.g., 'llama3' or 'mistral'
         
+        # Initialize vector store
+        self.vector_store = vector_store
+        if self.vector_store is None:
+            self.vector_store = SchemaVectorStore()
+        
         # Get database schemas
         self.schemas = self.db.get_all_schemas()
+        
+        # If vector store is empty, populate it with current schemas
+        if len(self.vector_store.metadata) == 0 and self.schemas:
+            self.vector_store.add_schemas(self.schemas)
     
-    def _build_system_prompt(self) -> str:
-        """Build system prompt"""
-        schema_text = self._format_schemas()
+    def refresh_schemas(self):
+        """Refresh schemas from database and update vector store"""
+        self.schemas = self.db.get_all_schemas()
+        if self.schemas:
+            self.vector_store.clear()
+            self.vector_store.add_schemas(self.schemas)
+    
+    def _build_system_prompt(self, natural_query: Optional[str] = None) -> str:
+        """Build system prompt with relevant schemas"""
+        if self.use_vector_search and natural_query and self.vector_store:
+            # Use vector search to find relevant schemas
+            relevant_schemas = self.vector_store.search(natural_query, top_k=10)
+            if relevant_schemas:
+                # Use only relevant schemas
+                schemas_dict = {item['table_name']: item['schema'] for item in relevant_schemas}
+                schema_text = self._format_schemas(schemas_dict)
+            else:
+                # Fallback to all schemas
+                schema_text = self._format_schemas()
+        else:
+            # Use all schemas
+            schema_text = self._format_schemas()
         
         return f"""You are a professional medical database SQL query assistant. Your task is to convert doctors' natural language queries into accurate SQL statements.
 
@@ -52,16 +92,19 @@ You must return the following JSON format:
     "tables_used": ["table1", "table2"]
 }}"""
     
-    def _format_schemas(self) -> str:
+    def _format_schemas(self, schemas: Optional[Dict[str, Dict]] = None) -> str:
         """Format database schema information"""
+        if schemas is None:
+            schemas = self.schemas
+        
         schema_lines = []
-        for table_name, schema in self.schemas.items():
+        for table_name, schema in schemas.items():
             schema_lines.append(f"\nTable: {table_name}")
             schema_lines.append("Columns:")
             for col in schema['columns']:
                 nullable = "Nullable" if col['nullable'] else "Not Null"
                 schema_lines.append(f"  - {col['name']} ({col['type']}, {nullable})")
-            if schema['primary_key']:
+            if schema.get('primary_key'):
                 schema_lines.append(f"  Primary Key: {', '.join(schema['primary_key'])}")
         
         return '\n'.join(schema_lines)
@@ -69,11 +112,13 @@ You must return the following JSON format:
     def generate_sql(self, natural_query: str) -> Dict[str, Any]:
         """Generate SQL from natural language"""
         
+        system_prompt = self._build_system_prompt(natural_query)
+        
         if self.provider == 'openai':
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": self._build_system_prompt()},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Please convert the following query to SQL:\n{natural_query}"}
                 ],
                 temperature=0.1,
@@ -85,7 +130,7 @@ You must return the following JSON format:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
-                system=self._build_system_prompt(),
+                system=system_prompt,
                 messages=[
                     {"role": "user", "content": f"Please convert the following query to SQL:\n{natural_query}"}
                 ],
@@ -108,7 +153,7 @@ You must return the following JSON format:
                     f"{DatabaseConfig.OLLAMA_BASE_URL}/api/generate",
                     json={
                         "model": self.model,
-                        "prompt": f"System: {self._build_system_prompt()}\n\nUser: Please convert the following query to SQL:\n{natural_query}",
+                        "prompt": f"System: {system_prompt}\n\nUser: Please convert the following query to SQL:\n{natural_query}",
                         "stream": False,
                         "temperature": 0.1,
                         "format": "json"

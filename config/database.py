@@ -1,4 +1,5 @@
 import os
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -31,6 +32,16 @@ class DatabaseConfig:
     # SQLite configuration
     SQLITE_PATH = os.getenv('SQLITE_PATH', './data/hospital.db')
     
+    # SQL Server / Caboodle configuration
+    SQLSERVER_CONFIG = {
+        'host': os.getenv('SQLSERVER_HOST', 'localhost'),
+        'port': int(os.getenv('SQLSERVER_PORT', 1433)),
+        'user': os.getenv('SQLSERVER_USER', ''),
+        'password': os.getenv('SQLSERVER_PASSWORD', ''),
+        'database': os.getenv('SQLSERVER_DATABASE', ''),
+        'driver': os.getenv('SQLSERVER_DRIVER', 'ODBC Driver 17 for SQL Server')
+    }
+    
     # LLM configuration
     LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'openai')  # openai, claude, ollama, etc
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
@@ -54,6 +65,13 @@ class DatabaseConfig:
         
         elif cls.DB_TYPE == 'sqlite':
             return f"sqlite:///{cls.SQLITE_PATH}"
+        
+        elif cls.DB_TYPE == 'sqlserver' or cls.DB_TYPE == 'caboodle':
+            config = cls.SQLSERVER_CONFIG
+            # SQL Server connection string with pyodbc - URL encode driver name
+            driver_encoded = quote_plus(config['driver'])
+            password_encoded = quote_plus(config['password'])
+            return f"mssql+pyodbc://{config['user']}:{password_encoded}@{config['host']}:{config['port']}/{config['database']}?driver={driver_encoded}"
         
         else:
             raise ValueError(f"Unsupported database type: {cls.DB_TYPE}")

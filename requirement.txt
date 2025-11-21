@@ -21,3 +21,7 @@ plotly>=5.18.0
 # Utilities
 python-dotenv>=1.0.0
 pyyaml>=6.0
+
+# Vector database and embeddings
+faiss-cpu>=1.7.4              # FAISS vector database (use faiss-gpu for GPU support)
+sentence-transformers>=2.2.0  # For generating embeddings
