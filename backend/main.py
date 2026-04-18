@@ -29,6 +29,10 @@ from database.wholegraph_loader import load_wholegraph_schema
 from llm.sql_generator import SQLGenerator
 from llm.schema_retriever import retrieve_relevant_schema
 
+# Multi-agent system
+from agents.orchestrator import Orchestrator
+from context.store import ConversationStore
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -57,6 +61,13 @@ schema_storage = SchemaStorage()
 
 # Store active connections (in production, use Redis or similar)
 active_connections: Dict[str, DatabaseConnection] = {}
+
+# Multi-agent orchestrator (lazy – created after schema_storage is ready)
+conversation_store = ConversationStore()
+orchestrator = Orchestrator(
+    schema_storage=schema_storage,
+    conversation_store=conversation_store,
+)
 
 
 # Pydantic models
@@ -493,12 +504,129 @@ async def download_results(connection_id: str, request: DownloadRequest, format:
         raise HTTPException(status_code=500, detail=str(e) or repr(e))
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Multi-Agent endpoints  (new /api/agent/* routes)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class AgentChatRequest(BaseModel):
+    """Payload for the conversational multi-agent endpoint."""
+    message: str
+    connection_id: str
+
+
+class AgentConfirmRequest(BaseModel):
+    task_id: str
+    connection_id: str
+    modified_sql: Optional[str] = None
+
+
+class AgentRejectRequest(BaseModel):
+    task_id: str
+    connection_id: str
+    reason: str = ""
+
+
+@app.post("/api/agent/chat")
+async def agent_chat(request: AgentChatRequest):
+    """
+    Conversational multi-agent endpoint.
+
+    Sends the user message through the full agent pipeline:
+    Intent → Schema → SQL → Validation → [HITL pause or Execute] → Explain.
+
+    Returns a dict with ``status`` being one of:
+    - ``completed``              – query executed, results included
+    - ``awaiting_confirmation``  – SQL generated, needs user OK
+    - ``clarification_needed``   – ambiguous request, follow-up included
+    - ``error``                  – something went wrong
+    """
+    db_conn = active_connections.get(request.connection_id)
+    if not db_conn:
+        raise HTTPException(status_code=503, detail=SESSION_EXPIRED_DETAIL)
+
+    try:
+        result = orchestrator.handle_message(
+            connection_id=request.connection_id,
+            user_message=request.message,
+            db_connection=db_conn,
+        )
+        return result
+    except Exception as e:
+        logger.exception("Agent chat failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/agent/confirm")
+async def agent_confirm(request: AgentConfirmRequest):
+    """
+    Confirm a pending task (human-in-the-loop approval).
+
+    Optionally include ``modified_sql`` to override the generated query.
+    """
+    db_conn = active_connections.get(request.connection_id)
+    if not db_conn:
+        raise HTTPException(status_code=503, detail=SESSION_EXPIRED_DETAIL)
+
+    result = orchestrator.confirm_task(
+        task_id=request.task_id,
+        db_connection=db_conn,
+        modified_sql=request.modified_sql,
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.post("/api/agent/reject")
+async def agent_reject(request: AgentRejectRequest):
+    """Reject a pending task."""
+    result = orchestrator.reject_task(
+        task_id=request.task_id,
+        reason=request.reason,
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.get("/api/agent/history/{connection_id}")
+async def agent_history(connection_id: str, limit: int = 50):
+    """Get conversation history for a connection."""
+    return orchestrator.get_conversation_history(connection_id, limit=limit)
+
+
+@app.get("/api/agent/query-history/{connection_id}")
+async def agent_query_history(connection_id: str, limit: int = 20):
+    """Get query history (executed SQLs) for a connection."""
+    return orchestrator.get_query_history(connection_id, limit=limit)
+
+
+@app.delete("/api/agent/history/{connection_id}")
+async def agent_clear_history(connection_id: str):
+    """Clear all conversation history for a connection."""
+    orchestrator.clear_conversation(connection_id)
+    return {"message": "Conversation history cleared"}
+
+
+@app.post("/api/agent/new-conversation/{connection_id}")
+async def agent_new_conversation(connection_id: str):
+    """Start a fresh conversation thread (old messages are preserved in DB)."""
+    conv_id = orchestrator.new_conversation(connection_id)
+    return {"conversation_id": conv_id, "message": "New conversation started"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Utility endpoints
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 @app.get("/")
 async def root():
     """Root endpoint with API information"""
     return {
         "message": "SQL Agent API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "docs": "/docs",
         "health": "/api/health",
         "endpoints": {
@@ -506,7 +634,14 @@ async def root():
             "schema": "GET /api/schema/{connection_id}",
             "schema_refresh": "POST /api/schema/{connection_id}/refresh",
             "query": "POST /api/query",
-            "download": "POST /api/download/{connection_id}"
+            "download": "POST /api/download/{connection_id}",
+            "agent_chat": "POST /api/agent/chat",
+            "agent_confirm": "POST /api/agent/confirm",
+            "agent_reject": "POST /api/agent/reject",
+            "agent_history": "GET /api/agent/history/{connection_id}",
+            "agent_query_history": "GET /api/agent/query-history/{connection_id}",
+            "agent_clear_history": "DELETE /api/agent/history/{connection_id}",
+            "agent_new_conversation": "POST /api/agent/new-conversation/{connection_id}",
         }
     }
 
