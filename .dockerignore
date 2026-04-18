@@ -1,0 +1,22 @@
+# Secrets
+backend/.env
+**/.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Cached schemas (rebuilt at runtime)
+backend/schemas/*.json
+
+# Node frontend (not deployed)
+frontend/
+frontend/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# Docs
+*.md
+docs/

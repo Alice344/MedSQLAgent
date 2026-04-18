@@ -1,0 +1,11 @@
+# Optional dependencies
+# Install these only if you need them
+
+# For pandas DataFrame support (optional)
+pandas==2.1.3
+
+# Alternative SQL Server driver (optional, if you prefer pymssql over pyodbc)
+pymssql==2.2.11
+
+
+
