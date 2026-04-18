@@ -17,7 +17,7 @@ import pandas as pd
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8001")
 
 st.set_page_config(
     page_title="SQL Agent — Multi-Agent",
@@ -347,7 +347,19 @@ else:
                         st.rerun()
 
         # Chat input
-        if user_input := st.chat_input("Ask a question about your database…"):
+        with st.form("chat_prompt_form", clear_on_submit=True):
+            input_col, button_col = st.columns([6, 1])
+            with input_col:
+                user_input = st.text_input(
+                    "Ask a question about your database",
+                    placeholder="Ask a question about your database…",
+                    label_visibility="collapsed",
+                )
+            with button_col:
+                send_clicked = st.form_submit_button("Send", use_container_width=True)
+
+        if send_clicked and user_input.strip():
+            user_input = user_input.strip()
             _add_chat("user", user_input)
             with st.chat_message("user"):
                 st.markdown(user_input)
@@ -408,6 +420,9 @@ else:
                     if data.get("explanation"):
                         _add_chat("assistant", data["explanation"])
                     st.rerun()
+
+        elif send_clicked:
+            st.warning("Enter a question first")
 
     # ── Raw SQL tab ──────────────────────────────────────────────────────
 
