@@ -1,30 +1,19 @@
 """
 LLM-based SQL query generator
 """
-import os
 import re
 from typing import Optional
-from openai import OpenAI
+from llm.client import get_llm_client, get_model_name
 import logging
 
 logger = logging.getLogger(__name__)
-
-# Default model (override with OPENAI_MODEL in backend/.env)
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-EXPLAIN_MODEL = os.getenv("OPENAI_EXPLAIN_MODEL", "gpt-4o-mini")
 
 
 class SQLGenerator:
     """Generates SQL queries from natural language using LLM"""
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "OpenAI API key is required. Set OPENAI_API_KEY in backend/.env "
-                "or in your environment."
-            )
-        self.client = OpenAI(api_key=self.api_key)
+        self.client = get_llm_client()
 
     def generate_sql(
         self,
@@ -56,7 +45,7 @@ User Request:
 
 Generate the SQL query using only the tables and columns listed above:"""
 
-        model = model or DEFAULT_MODEL
+        model = model or get_model_name()
 
         try:
             response = self.client.chat.completions.create(
@@ -108,7 +97,7 @@ Generate the SQL query using only the tables and columns listed above:"""
 
         try:
             response = self.client.chat.completions.create(
-                model=EXPLAIN_MODEL,
+                model=get_model_name(),
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=300,
