@@ -119,10 +119,11 @@ class DatabaseConnection:
             logger.error(f"Connection test failed: {e}")
             return False
     
-    def execute_query(self, query: str) -> List[Dict[str, Any]]:
+    def execute_query(self, query: str, max_rows: int = 10000) -> List[Dict[str, Any]]:
         """Execute a SQL query and return results as list of dictionaries"""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            conn.timeout = 120  # 2 minute query timeout
             
             # Handle different query types
             query_upper = query.strip().upper()
@@ -135,8 +136,8 @@ class DatabaseConnection:
                 if cursor.description:
                     columns = [column[0] for column in cursor.description]
                     
-                    # Fetch all rows
-                    rows = cursor.fetchall()
+                    # Fetch rows with a safety limit to prevent OOM
+                    rows = cursor.fetchmany(max_rows)
                     
                     # Convert to list of dictionaries
                     results = [dict(zip(columns, row)) for row in rows]
