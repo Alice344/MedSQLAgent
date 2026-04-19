@@ -528,7 +528,7 @@ class AgentRejectRequest(BaseModel):
 
 
 @app.post("/api/agent/chat")
-async def agent_chat(request: AgentChatRequest):
+def agent_chat(request: AgentChatRequest):
     """
     Conversational multi-agent endpoint.
 
@@ -558,7 +558,7 @@ async def agent_chat(request: AgentChatRequest):
 
 
 @app.post("/api/agent/confirm")
-async def agent_confirm(request: AgentConfirmRequest):
+def agent_confirm(request: AgentConfirmRequest):
     """
     Confirm a pending task (human-in-the-loop approval).
 
@@ -568,18 +568,24 @@ async def agent_confirm(request: AgentConfirmRequest):
     if not db_conn:
         raise HTTPException(status_code=503, detail=SESSION_EXPIRED_DETAIL)
 
-    result = orchestrator.confirm_task(
-        task_id=request.task_id,
-        db_connection=db_conn,
-        modified_sql=request.modified_sql,
-    )
-    if result.get("status") == "error":
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
+    try:
+        result = orchestrator.confirm_task(
+            task_id=request.task_id,
+            db_connection=db_conn,
+            modified_sql=request.modified_sql,
+        )
+        if result.get("status") == "error":
+            raise HTTPException(status_code=404, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Agent confirm failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/agent/reject")
-async def agent_reject(request: AgentRejectRequest):
+def agent_reject(request: AgentRejectRequest):
     """Reject a pending task."""
     result = orchestrator.reject_task(
         task_id=request.task_id,
