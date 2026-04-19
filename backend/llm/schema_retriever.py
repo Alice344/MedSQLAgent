@@ -8,14 +8,13 @@ Stage 2: Return the full schema for only those tables, keeping the SQL-generatio
 """
 import json
 import os
+import re
 import logging
 from typing import Any, Dict, List
 
-from openai import OpenAI
+from llm.client import get_llm_client, get_model_name
 
 logger = logging.getLogger(__name__)
-
-TABLE_SELECTOR_MODEL = os.getenv("OPENAI_TABLE_SELECTOR_MODEL", "gpt-4o-mini")
 
 # gpt-4o-mini supports 128K tokens; keep a buffer for system/user prompt + response
 MAX_CATALOG_TOKENS = 100_000
@@ -51,11 +50,8 @@ def _build_catalog(schema: Dict[str, Any], max_desc_len: int = 150) -> str:
 
 def _ask_llm_for_tables(catalog: str, query: str, top_k: int) -> List[str]:
     """Ask the LLM to pick the top_k most relevant table names from the catalog."""
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
-    client = OpenAI(api_key=api_key)
+    client = get_llm_client()
+    model = get_model_name()
 
     system_prompt = f"""You are a database expert helping select relevant tables for a SQL query.
 You will be given a list of database tables with short descriptions, and a user question.
@@ -72,16 +68,19 @@ User question: {query}
 Return the {top_k} most relevant table names as a JSON array:"""
 
     response = client.chat.completions.create(
-        model=TABLE_SELECTOR_MODEL,
+        model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.0,
-        max_tokens=300,
+        max_tokens=2000,
     )
 
     raw = (response.choices[0].message.content or "").strip()
+
+    # Strip DeepSeek-R1 reasoning blocks
+    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
 
     # Strip markdown fences if present
     if raw.startswith("```"):

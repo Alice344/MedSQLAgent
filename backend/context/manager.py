@@ -39,7 +39,6 @@ except ImportError:
 DEFAULT_WINDOW_BUDGET = int(os.getenv("CONTEXT_WINDOW_BUDGET", "12000"))
 SUMMARY_TRIGGER_RATIO = 0.75  # Summarise when usage exceeds 75 % of budget
 SUMMARY_TARGET_TOKENS = 600   # Target size for the summary block
-SUMMARISE_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 
 
 # ── Data ─────────────────────────────────────────────────────────────────────
@@ -162,12 +161,17 @@ class ContextWindowManager:
 
         text_block = "\n".join(self._format_msg(m) for m in to_summarise)
 
-        try:
-            from openai import OpenAI
+        # Cap text_block to avoid blowing up the summarisation LLM call
+        max_chars = 8000  # ~2000 tokens — safe for any model
+        if len(text_block) > max_chars:
+            text_block = text_block[-max_chars:]
 
-            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        try:
+            from llm.client import get_llm_client, get_model_name
+
+            client = get_llm_client()
             resp = client.chat.completions.create(
-                model=SUMMARISE_MODEL,
+                model=get_model_name(),
                 messages=[
                     {
                         "role": "system",

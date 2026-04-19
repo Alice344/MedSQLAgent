@@ -46,15 +46,31 @@ async def favicon():
     return Response(status_code=204)
 
 
-# CORS middleware - allow all origins for demo (restrict in production)
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Azure App Service / load balancers."""
+    return {"status": "healthy", "active_connections": len(active_connections)}
+
+
+# CORS middleware – configurable via ALLOWED_ORIGINS env var.
+# Default "*" for local dev; set to your frontend URL in production.
+import os as _os
+_allowed_origins = [
+    o.strip()
+    for o in _os.getenv("ALLOWED_ORIGINS", "*").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for demo
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# ── Connection cap ───────────────────────────────────────────────────────────
+MAX_ACTIVE_CONNECTIONS = int(_os.getenv("MAX_CONNECTIONS", "100"))
 
 # Initialize storage
 schema_storage = SchemaStorage()
@@ -318,7 +334,12 @@ async def connect_database(credentials: DatabaseCredentials):
                     "Failed to save schema for %s, but continuing...", connection_id
                 )
 
-        # Store connection
+        # Store connection (with cap)
+        if len(active_connections) >= MAX_ACTIVE_CONNECTIONS and connection_id not in active_connections:
+            # Evict the oldest connection to make room
+            oldest_id = next(iter(active_connections))
+            active_connections.pop(oldest_id, None)
+            logger.warning("Evicted oldest connection %s (cap=%d)", oldest_id, MAX_ACTIVE_CONNECTIONS)
         active_connections[connection_id] = db_conn
 
         return {
@@ -600,6 +621,35 @@ def agent_reject(request: AgentRejectRequest):
 async def agent_history(connection_id: str, limit: int = 50):
     """Get conversation history for a connection."""
     return orchestrator.get_conversation_history(connection_id, limit=limit)
+
+
+class VisualizeRequest(BaseModel):
+    """Request to generate visualizations from the last executed query."""
+    task_id: str
+    connection_id: str
+
+
+@app.post("/api/agent/visualize")
+def agent_visualize(request: VisualizeRequest):
+    """
+    Generate Plotly visualizations from results of a completed task.
+
+    Can be called after a query has been executed to add charts.
+    """
+    db_conn = active_connections.get(request.connection_id)
+    if not db_conn:
+        raise HTTPException(status_code=503, detail=SESSION_EXPIRED_DETAIL)
+
+    try:
+        result = orchestrator.visualize_task(request.task_id)
+        if result.get("status") == "error":
+            raise HTTPException(status_code=400, detail=result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Visualization failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/agent/query-history/{connection_id}")

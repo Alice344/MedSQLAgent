@@ -6,14 +6,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 from .base import AgentResult, AgentRole, BaseAgent, IntentType, TaskContext
 
 logger = logging.getLogger(__name__)
-
-EXPLAIN_MODEL = os.getenv("OPENAI_EXPLAIN_MODEL", "gpt-4o-mini")
 
 
 class ExplanationAgent(BaseAgent):
@@ -51,7 +48,6 @@ class ExplanationAgent(BaseAgent):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                model=EXPLAIN_MODEL,
                 temperature=0.3,
                 max_tokens=400,
             )
