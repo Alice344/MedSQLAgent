@@ -17,6 +17,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Create data directory for SQLite conversation store
+RUN mkdir -p /app/data
+
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Production: disable reload, use multiple workers, read PORT from env
+ENV SQLAGENT_RELOAD=0
+ENV SQLAGENT_WORKERS=4
+ENV PORT=8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+CMD ["python", "run.py"]

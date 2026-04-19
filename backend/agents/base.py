@@ -11,14 +11,13 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
-
-from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +33,7 @@ class AgentRole(str, Enum):
     VALIDATOR = "validator"
     EXECUTOR = "executor"
     EXPLAINER = "explainer"
+    VISUALIZER = "visualizer"
 
 
 class TaskStatus(str, Enum):
@@ -55,6 +55,7 @@ class IntentType(str, Enum):
     FOLLOWUP = "followup"
     CLARIFY = "clarify"
     GENERAL = "general"
+    VISUALIZE = "visualize"
 
 
 # ── Data classes ─────────────────────────────────────────────────────────────
@@ -90,6 +91,7 @@ class TaskContext:
     validation_result: Optional[Dict[str, Any]] = None
     execution_result: Optional[Dict[str, Any]] = None
     explanation: Optional[str] = None
+    visualization_config: Optional[Dict[str, Any]] = None
 
     # Status
     status: TaskStatus = TaskStatus.PENDING
@@ -168,11 +170,10 @@ class BaseAgent(ABC):
     default_model: str = "gpt-4o-mini"
 
     def __init__(self, model: Optional[str] = None):
-        self.model = model or os.getenv("OPENAI_MODEL", self.default_model)
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY is required")
-        self.client = OpenAI(api_key=api_key)
+        from llm.client import get_llm_client, get_model_name
+
+        self.model = model or get_model_name()
+        self.client = get_llm_client()
         self.logger = logging.getLogger(f"agent.{self.role.value}")
 
     # ── LLM helper ───────────────────────────────────────────────────────
@@ -194,8 +195,27 @@ class BaseAgent(ABC):
         )
         if response_format:
             kwargs["response_format"] = response_format
-        resp = self.client.chat.completions.create(**kwargs)
-        return (resp.choices[0].message.content or "").strip()
+        try:
+            resp = self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "context_length" in err_msg or "token" in err_msg or "too long" in err_msg:
+                self.logger.error("LLM context length exceeded: %s", exc)
+                raise RuntimeError(
+                    "The conversation is too long for the model's context window. "
+                    "Please start a new conversation."
+                ) from exc
+            if "timeout" in err_msg or "timed out" in err_msg:
+                self.logger.error("LLM request timed out: %s", exc)
+                raise RuntimeError(
+                    "The LLM request timed out. Please try again."
+                ) from exc
+            self.logger.error("LLM API error: %s", exc)
+            raise RuntimeError(f"LLM call failed: {exc}") from exc
+        raw = (resp.choices[0].message.content or "").strip()
+        # Strip DeepSeek-R1 reasoning blocks
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        return raw
 
     # ── Abstract ─────────────────────────────────────────────────────────
 

@@ -5,8 +5,18 @@ import pyodbc
 from typing import Optional, Dict, List, Any
 from contextlib import contextmanager
 import logging
+import os
 
 logger = logging.getLogger(__name__)
+
+# ── Connection pooling ───────────────────────────────────────────────────────
+# pyodbc uses ODBC driver-level connection pooling.  Enable it once at import
+# time so every `pyodbc.connect()` call benefits automatically.
+pyodbc.pooling = True
+
+# Maximum connections the pool will keep open (default is per-driver).
+# Set via env var; 0 = use driver default.
+_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "20"))
 
 
 class DatabaseConnection:

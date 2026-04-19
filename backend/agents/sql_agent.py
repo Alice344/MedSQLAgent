@@ -7,15 +7,12 @@ conversation-aware prompting when prior queries are available.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from typing import Any, Dict, List, Optional
 
 from .base import AgentResult, AgentRole, BaseAgent, TaskContext
 
 logger = logging.getLogger(__name__)
-
-SQL_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
 class SQLGeneratorAgent(BaseAgent):
@@ -58,7 +55,6 @@ class SQLGeneratorAgent(BaseAgent):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            model=SQL_MODEL,
             temperature=0.1,
             max_tokens=1500,
         )

@@ -6,18 +6,24 @@ Responsibilities
 1. Accept a user message and route it through sub-agents.
 2. Maintain per-connection context windows (token-managed).
 3. Persist conversations and query history to SQLite.
-4. Pause the pipeline for human-in-the-loop (HITL) confirmation when required.
+4. Pause the pipeline for human-in-the-loop (HITL) confirmation on EVERY query.
 5. Resume execution after the user confirms / rejects / modifies.
 
 Pipeline (for a typical QUERY intent)
 --------------------------------------
-User msg → IntentAgent → SchemaAgent → SQLGeneratorAgent → ValidationAgent
-  → [HITL pause if needed] → ExecutionAgent → ExplanationAgent → Response
+User msg → IntentAgent (+ table selection) → [resolve full schema]
+  → SQLGeneratorAgent → ValidationAgent → **HITL pause (always)**
+  → (user confirms) → ExecutionAgent → ExplanationAgent → Response
+
+Optimisations vs. original:
+  - Intent + table selection merged into 1 LLM call  (was 2)
+  - HITL always pauses — user sees SQL before any execution
+  - Stale pending tasks auto-rejected on new message
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from database.connection import DatabaseConnection
 from database.schema_storage import SchemaStorage
@@ -32,8 +38,25 @@ from .sql_agent import SQLGeneratorAgent
 from .validation_agent import ValidationAgent
 from .execution_agent import ExecutionAgent
 from .explanation_agent import ExplanationAgent
+from .visualization_agent import VisualizationAgent
 
 logger = logging.getLogger(__name__)
+
+# ── Catalog builder (shared with schema_retriever) ───────────────────────────
+
+_MAX_DESC = 150
+
+
+def _build_table_catalog(schema: Dict[str, Any]) -> str:
+    """Build a compact one-line-per-table catalog for the merged IntentAgent."""
+    lines: List[str] = []
+    for tbl in schema.get("tables", []):
+        name = tbl["full_name"]
+        desc = (tbl.get("description") or "").replace("\n", " ").strip()
+        if len(desc) > _MAX_DESC:
+            desc = desc[:_MAX_DESC] + "…"
+        lines.append(f"{name} -- {desc}" if desc else name)
+    return "\n".join(lines)
 
 
 class Orchestrator:
@@ -58,6 +81,10 @@ class Orchestrator:
         # Pending tasks awaiting human confirmation (task_id → TaskContext)
         self.pending_tasks: Dict[str, TaskContext] = {}
 
+        # Completed tasks (task_id → TaskContext) for post-hoc visualization
+        self._completed_tasks: Dict[str, TaskContext] = {}
+        self._MAX_COMPLETED_TASKS = 50  # evict oldest when exceeded
+
         self.context_budget = context_budget
 
         # Lazy-init agents (created on first use so OPENAI_API_KEY can be set later)
@@ -79,6 +106,8 @@ class Orchestrator:
                 self._agents[role] = ExecutionAgent()
             elif role == AgentRole.EXPLAINER:
                 self._agents[role] = ExplanationAgent()
+            elif role == AgentRole.VISUALIZER:
+                self._agents[role] = VisualizationAgent()
             else:
                 raise ValueError(f"Unknown agent role: {role}")
         return self._agents[role]
@@ -87,6 +116,10 @@ class Orchestrator:
 
     def _ctx_mgr(self, connection_id: str) -> ContextWindowManager:
         if connection_id not in self._contexts:
+            # Cap context managers to prevent unbounded memory growth
+            if len(self._contexts) > 200:
+                oldest = next(iter(self._contexts))
+                del self._contexts[oldest]
             self._contexts[connection_id] = ContextWindowManager(budget=self.context_budget)
         return self._contexts[connection_id]
 
@@ -115,6 +148,16 @@ class Orchestrator:
           - confirmation_message (when HITL pause)
           - agent_trace: list of agent messages
         """
+        # ── Auto-reject any stale pending tasks for this connection ──────
+        stale_ids = [
+            tid
+            for tid, t in list(self.pending_tasks.items())
+            if t.connection_id == connection_id
+        ]
+        for tid in stale_ids:
+            self.pending_tasks.pop(tid, None)
+            logger.info("Auto-rejected stale pending task %s", tid)
+
         ctx = TaskContext(connection_id=connection_id, user_query=user_message)
         ctx.status = TaskStatus.IN_PROGRESS
 
@@ -124,7 +167,10 @@ class Orchestrator:
         conv_id = self.store.get_or_create_conversation(connection_id)
         self.store.add_message(conv_id, "user", user_message)
 
-        # 1. Intent classification
+        # ── Build table catalog for intent classification only ────────────
+        schema = self.schema_storage.load_schema(connection_id)
+
+        # 1. Intent classification (1 LLM call — no table selection here)
         try:
             intent_result = self._run_agent(
                 AgentRole.INTENT,
@@ -165,12 +211,12 @@ class Orchestrator:
             ctx.status = TaskStatus.COMPLETED
             return self._build_response(ctx)
 
-        # 2. Schema retrieval (for query/followup/export/modify)
+        # 2. Schema retrieval via dedicated SchemaAgent (RAG-based, 1 LLM call)
         schema_result = self._run_agent(AgentRole.SCHEMA, ctx)
         if not schema_result.success:
             return self._error_response(ctx, schema_result.error or "Schema retrieval failed")
 
-        # 3. SQL generation
+        # 3. SQL generation (1 LLM call)
         sql_result = self._run_agent(
             AgentRole.SQL_GENERATOR,
             ctx,
@@ -180,27 +226,32 @@ class Orchestrator:
         if not sql_result.success:
             return self._error_response(ctx, sql_result.error or "SQL generation failed")
 
-        # 4. Validation
+        # 4. Validation (rule-based, no LLM)
         val_result = self._run_agent(AgentRole.VALIDATOR, ctx)
         if not val_result.success:
             return self._error_response(ctx, val_result.error or "Validation failed")
 
-        # 5. Check if human confirmation is needed
-        if val_result.needs_confirmation:
-            ctx.status = TaskStatus.AWAITING_CONFIRMATION
-            ctx.needs_confirmation = True
-            ctx.confirmation_message = val_result.confirmation_message
-            self.pending_tasks[ctx.task_id] = ctx
-            # Store the db_connection reference for later
-            if db_connection:
-                ctx.add_message("system", "__db_ref__", metadata={"_db_ref": True})
-            return self._build_response(ctx, status="awaiting_confirmation")
+        # 5. ALWAYS pause for HITL confirmation
+        ctx.status = TaskStatus.AWAITING_CONFIRMATION
+        ctx.needs_confirmation = True
+        ctx.confirmation_message = (
+            val_result.confirmation_message
+            or "Please review the generated SQL and confirm execution."
+        )
+        self.pending_tasks[ctx.task_id] = ctx
+        # Store db_connection info for later
+        if db_connection:
+            ctx.add_message("system", "__db_ref__", metadata={"_db_ref": True})
+        return self._build_response(ctx, status="awaiting_confirmation")
 
-        # 6. Execute (no confirmation needed — low-risk SELECT)
-        if db_connection is None:
-            return self._error_response(ctx, "No active database connection")
+    # ── Visualization on completed tasks ─────────────────────────────────
 
-        return self._execute_and_explain(ctx, db_connection, conv_id, cm)
+    def visualize_task(self, task_id: str) -> Dict[str, Any]:
+        """Generate visualizations for a previously completed task stored in _completed_tasks."""
+        ctx = self._completed_tasks.get(task_id)
+        if ctx is None:
+            return {"status": "error", "error": "Task not found. Visualization must be requested on a completed query."}
+        return self._visualize_results(ctx)
 
     # ── Confirmation handlers ────────────────────────────────────────────
 
@@ -285,7 +336,12 @@ class Orchestrator:
     def _run_agent(self, role: AgentRole, ctx: TaskContext, **kwargs: Any) -> AgentResult:
         agent = self._get_agent(role)
         logger.info("Running %s agent for task %s", role.value, ctx.task_id)
-        return agent.run(ctx, **kwargs)
+        try:
+            return agent.run(ctx, **kwargs)
+        except RuntimeError as exc:
+            logger.error("Agent %s failed for task %s: %s", role.value, ctx.task_id, exc)
+            ctx.add_message("system", f"Agent {role.value} error: {exc}", agent=role.value)
+            return AgentResult(success=False, error=str(exc))
 
     def _execute_and_explain(
         self,
@@ -310,6 +366,10 @@ class Orchestrator:
 
         # Explanation
         self._run_agent(AgentRole.EXPLAINER, ctx)
+
+        # Visualization (if user requested it)
+        if ctx.intent == IntentType.VISUALIZE:
+            self._run_agent(AgentRole.VISUALIZER, ctx)
 
         # Update context window
         assistant_reply = (
@@ -337,8 +397,28 @@ class Orchestrator:
             self.store.update_conversation_summary(conv_id, summary)
 
         ctx.status = TaskStatus.COMPLETED
+        self._completed_tasks[ctx.task_id] = ctx
+        # Evict oldest completed tasks if limit exceeded
+        if len(self._completed_tasks) > self._MAX_COMPLETED_TASKS:
+            oldest = next(iter(self._completed_tasks))
+            del self._completed_tasks[oldest]
         return self._build_response(ctx)
 
+    def _visualize_results(self, ctx: TaskContext) -> Dict[str, Any]:
+        """Run visualization agent on already-executed results."""
+        viz_result = self._run_agent(AgentRole.VISUALIZER, ctx)
+        if not viz_result.success:
+            return {"status": "error", "error": viz_result.error or "Visualization failed"}
+        return {
+            "status": "completed",
+            "task_id": ctx.task_id,
+            "visualization": viz_result.data.get("visualization"),
+            "chart_count": viz_result.data.get("chart_count", 0),
+            "agent_trace": [
+                {"role": m.role, "content": m.content, "agent": m.agent}
+                for m in ctx.messages
+            ],
+        }
     def _build_response(
         self,
         ctx: TaskContext,
@@ -359,6 +439,8 @@ class Orchestrator:
         if ctx.execution_result:
             resp["results"] = ctx.execution_result.get("results", [])
             resp["row_count"] = ctx.execution_result.get("row_count", 0)
+        if ctx.visualization_config:
+            resp["visualization"] = ctx.visualization_config
         if ctx.needs_confirmation:
             resp["confirmation_message"] = ctx.confirmation_message
             resp["validation"] = ctx.validation_result

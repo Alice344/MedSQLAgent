@@ -1,0 +1,42 @@
+# docker-compose.yml – run backend + frontend together
+# Usage:
+#   docker compose up --build          (local dev)
+#   docker compose -f docker-compose.yml up  (prod – set env vars)
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "${BACKEND_PORT:-8001}:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      - PORT=8000
+      - SQLAGENT_RELOAD=0
+      - SQLAGENT_WORKERS=4
+      - ALLOWED_ORIGINS=http://localhost:8501,http://localhost:${FRONTEND_PORT:-8501}
+      - MAX_CONNECTIONS=100
+      - DB_POOL_SIZE=20
+      - LLM_CACHE_ENABLED=1
+    volumes:
+      - backend-data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-8501}:8501"
+    environment:
+      - API_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  backend-data:

@@ -14,6 +14,7 @@ import streamlit as st
 import requests
 import json
 import pandas as pd
+import plotly.graph_objects as go
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -32,6 +33,7 @@ _DEFAULTS = {
     "last_sql_query": None,
     "chat_messages": [],       # [{role, content, data?, ...}]
     "pending_task": None,      # task awaiting confirmation
+    "last_task_id": None,      # last completed task for post-hoc visualization
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -110,6 +112,13 @@ def agent_reject(task_id: str, connection_id: str, reason: str = ""):
     })
 
 
+def agent_visualize(task_id: str, connection_id: str):
+    return _api_post("/api/agent/visualize", {
+        "task_id": task_id,
+        "connection_id": connection_id,
+    }, timeout=120)
+
+
 def execute_raw_sql(sql_query, connection_id):
     return _api_post(f"/api/query/execute-sql/{connection_id}", {"sql_query": sql_query})
 
@@ -119,6 +128,25 @@ def refresh_schema_from_db(connection_id):
 
 
 # ── UI helpers ───────────────────────────────────────────────────────────────
+
+
+def _render_plotly_charts(viz_config):
+    """Render Plotly charts from a visualization config dict."""
+    charts = viz_config.get("charts", [])
+    summary = viz_config.get("summary", "")
+    if summary:
+        st.markdown(summary)
+    for i, chart in enumerate(charts):
+        title = chart.get("title", f"Chart {i + 1}")
+        description = chart.get("description", "")
+        plotly_cfg = chart.get("plotly_config", {})
+        if description:
+            st.caption(description)
+        try:
+            fig = go.Figure(plotly_cfg)
+            st.plotly_chart(fig, use_container_width=True, key=f"chart_{id(viz_config)}_{i}")
+        except Exception as e:
+            st.error(f"Failed to render chart '{title}': {e}")
 
 
 def _render_chat_message(msg):
@@ -141,10 +169,16 @@ def _render_chat_message(msg):
             results = data.get("results", [])
             row_count = data.get("row_count", 0)
             if results:
+                PREVIEW_ROWS = 10
                 st.markdown(f"**Results** ({row_count} rows)")
                 df = pd.DataFrame(results)
-                st.dataframe(df, use_container_width=True)
-                col1, col2 = st.columns(2)
+                if len(df) > PREVIEW_ROWS:
+                    st.dataframe(df.head(PREVIEW_ROWS), use_container_width=True)
+                    with st.expander(f"Show all {row_count} rows"):
+                        st.dataframe(df, use_container_width=True)
+                else:
+                    st.dataframe(df, use_container_width=True)
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     st.download_button("📥 CSV", df.to_csv(index=False),
                                        "results.csv", "text/csv",
@@ -153,6 +187,20 @@ def _render_chat_message(msg):
                     st.download_button("📥 JSON", json.dumps(results, indent=2),
                                        "results.json", "application/json",
                                        use_container_width=True)
+                with col3:
+                    task_id = st.session_state.get("last_task_id")
+                    if task_id and st.button("📊 Visualize", use_container_width=True,
+                                             key=f"viz_btn_{id(msg)}"):
+                        with st.spinner("Generating charts…"):
+                            ok, viz_data, err = agent_visualize(
+                                task_id, st.session_state.connection_id
+                            )
+                        if ok and viz_data.get("visualization"):
+                            _add_chat("visualization", "",
+                                      data=viz_data["visualization"])
+                            st.rerun()
+                        else:
+                            st.error(err or "Visualization failed")
             else:
                 st.info("Query executed successfully — no rows returned.")
     elif role == "agent_trace":
@@ -161,6 +209,11 @@ def _render_chat_message(msg):
                 for step in msg.get("trace", []):
                     agent_name = step.get("agent", "unknown")
                     st.markdown(f"**[{agent_name}]** {step['content']}")
+    elif role == "visualization":
+        with st.chat_message("assistant"):
+            st.markdown("📊 **Visualizations**")
+            viz_config = msg.get("data", {})
+            _render_plotly_charts(viz_config)
     elif role == "error":
         with st.chat_message("assistant"):
             st.error(f"❌ {content}")
@@ -304,6 +357,9 @@ else:
                                     "results": data["results"],
                                     "row_count": data.get("row_count", 0),
                                 })
+                            if data.get("visualization"):
+                                _add_chat("visualization", "", data=data["visualization"])
+                            st.session_state["last_task_id"] = data.get("task_id")
                             if data.get("agent_trace"):
                                 _add_chat("agent_trace", "", trace=data["agent_trace"])
                         elif ok:
@@ -342,6 +398,9 @@ else:
                                     "results": data["results"],
                                     "row_count": data.get("row_count", 0),
                                 })
+                            if data.get("visualization"):
+                                _add_chat("visualization", "", data=data["visualization"])
+                            st.session_state["last_task_id"] = data.get("task_id")
                         else:
                             _add_chat("error", err or "Execution failed")
                         st.rerun()
@@ -395,6 +454,10 @@ else:
                             "results": data.get("results", []),
                             "row_count": data.get("row_count", 0),
                         })
+                    if data.get("visualization"):
+                        _add_chat("visualization", "", data=data["visualization"])
+                    # Store task_id for post-hoc visualization
+                    st.session_state["last_task_id"] = data.get("task_id")
                     st.rerun()
 
                 elif status == "clarification_needed":
