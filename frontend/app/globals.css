@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body {
+  height: 100%;
+}
+
+/* Thin scrollbar for chat area */
+.thin-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+.thin-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1;
+  border-radius: 9999px;
+}
+
+/* syntax highlight override */
+pre code {
+  font-size: 0.85rem !important;
+}

@@ -36,15 +36,15 @@ The backend will run on `http://localhost:8000`
 
 ### 2. Frontend Setup
 
-#### Option A: Streamlit (Recommended)
+#### Option A: Next.js (Recommended)
 
-```powershell
-cd frontend_streamlit
-pip install -r requirements.txt
-streamlit run app.py
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-Streamlit will open automatically at `http://localhost:8501`
+Open `http://localhost:3000` in your browser.
 
 #### Option B: HTML (No Installation)
 
