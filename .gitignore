@@ -54,6 +54,14 @@ Thumbs.db
 backend/schemas/
 *.json
 
+# Frontend exceptions – allow Next.js config/package files
+!frontend/package.json
+!frontend/tsconfig.json
+!frontend/next.config.js
+!frontend/tailwind.config.js
+!frontend/postcss.config.js
+!frontend/lib/
+
 # Large data files
 pci_classified_output.csv
 *.csv
