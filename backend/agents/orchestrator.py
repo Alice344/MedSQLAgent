@@ -1,454 +1,944 @@
 """
-Orchestrator – the central coordinator of the multi-agent pipeline.
+LangGraph-based Orchestrator.
 
-Responsibilities
-----------------
-1. Accept a user message and route it through sub-agents.
-2. Maintain per-connection context windows (token-managed).
-3. Persist conversations and query history to SQLite.
-4. Pause the pipeline for human-in-the-loop (HITL) confirmation on EVERY query.
-5. Resume execution after the user confirms / rejects / modifies.
+Architecture
+------------
+User message → StateGraph pipeline:
 
-Pipeline (for a typical QUERY intent)
---------------------------------------
-User msg → IntentAgent (+ table selection) → [resolve full schema]
-  → SQLGeneratorAgent → ValidationAgent → **HITL pause (always)**
-  → (user confirms) → ExecutionAgent → ExplanationAgent → Response
+  [intent] ──┬─ CLARIFY/GENERAL        → [final]
+             ├─ SCHEMA_EXPLORE          → [schema_explore] → [final]
+             ├─ EXPLAIN                 → [explain] → [final]
+             └─ (SQL path)              → [schema] → [sql] → [validate]
+                                                                  ↓
+                                                        interrupt_before=["execute_node"]
+                                                          (HITL pause — always)
+                                                                  ↓
+                                                           [execute] → [explain]
+                                                                          ↓
+                                                       VISUALIZE → [visualize] → [fin"""
+LangGraph-based Orchestrator.
 
-Optimisations vs. original:
-  - Intent + table selection merged into 1 LLM call  (was 2)
-  - HITL always pauses — user sees SQL before any execution
-  - Stale pending tasks auto-rejected on new message
-"""
-from __future__ import annotations
-
-import logging
-from typing import Any, Dict, List, Optional
-
-from database.connection import DatabaseConnection
-from database.schema_storage import SchemaStorage
+Architecture
+------------
+User messag  La  
+Architecture
+------------
+U--------------apUser messagus
+  [intent] ──┬─ CLARIFY/GENess             ├─ SCHEMA_EXPLORE          → [schema_* C             ├─ EXPLAIN                 → [explain] → [final]
+     tu             └─ (SQL path)              → [schema] → [sql] ?e                                                                  ↓
+          tu                                                        interrupt_beor                                                          (HITL pause — always)
+    mpor                                                                  ↓
+      databa                                                           [execute] i         emaStorage
 
 from context.manager import ContextWindowManager
-from context.store import ConversationStore
+from context.                                                       VISUALIZE → [visuaskCLangGraph-based Orchestrator.
 
-from .base import AgentResult, AgentRole, IntentType, TaskContext, TaskStatus
-from .intent_agent import IntentAgent
-from .schema_agent import SchemaAgent
-from .sql_agent import SQLGeneratorAgent
-from .validation_agent import ValidationAgent
-from .execution_agent import ExecutionAgent
-from .explanation_agent import ExplanationAgent
-from .visualization_agent import VisualizationAgent
+Architecture
+------------
+User messag  La  
+Architecture
+---l_
+Architecture
+------------
+Unt
+-----------atUser messagmpArchitecture
+--gen-----------cuU----------im  [intent] ──┬─ CLARIla     tu             └─ (SQL path)              → [schema] → [sql] ?e                                                                  ↓
+          tu      h(          tu                                                        interrupt_beor                                     ??────────?   mpor                                                                  ↓
+      databa                                                           [execute] i  =F      databa                                                           [execv_
+from context.manager import ContextWindowManager
+from context.                                     ed_from context.                                    
+Architecture
+------------
+User messag  La  
+Architecture
+---l_
+Architecture
+------------
+Unt
+-----------atUser messagm[st-----------  User messag: Architecture
+---  ---l_
+ArchionArchfi-----------[DUnt
+-------y]]
+  --gen-----------cuU----------im  ict[st          tu      h(          tu                                                        interrupt_beor                                     ??────────?   mpor                                ?     databa                                                           [execute] i  =F      databa                                                           [execv_
+from context.manager import ContextWindowManager
+from context.                trfrom context.manager import ContextWindowManager
+from context.                                     ed_from context.                                    
+Architectur  from context.                                  , Architecture
+------------
+User messag  La  
+Architecture
+---l_
+Architecture
+------------ce("\n", " ").s-----------  User messagscArchitecture
+---  ---l_
+Archic Archsc----------- +Unt
+-------  --li---  ---l_
+ArchionArchfi-----------[DUnt
+-------y]]
+  --gen------.jArchionAr)
+-------y]]
+  --gen----------??  --gen--?rom context.manager import ContextWindowManager
+from context.                trfrom context.manager import ContextWindowManager
+from context.                                     ed_from context.                                    
+Architectur  from context.                                  , Architecture
+------------
+User messag  La  
+Architecture
+---l_
+Architecture
+------------ce("\n", " ").s-----------  Use cfrom context.                trfrom context.man_dfrom context.                                     ed_from context.              Architectur  from context.                                  , Architecture
+------------
+User messag  ge------------
+User messag  La  
+Architecture
+---l_
+Architecture
+----------lfUser messagicArchitecture
+---] = {}
+        Arch._-----------on---  ---l_
+Archic Archsc----------- +Unt
+-------  --li---  ---l_skArchic Artr-------  --li---  ---l_
+ArchelArchionArchfi---------
+ -------y]]
+  --gen--ckpoint_db  --gen--UL-------y]]
+  --gen------Pa  --g_path)from context.                trfrom context.manager import ContextWindowManageSfrom conteconn_string(db_path)
+        self._graph = self._build_graph()
 
-logger = logging.getLogger(__name__)
+    # Architectur  from context.                                  , Architecture
+------------
+User messag  ??-----------
+User messag  La  
+Architecture
+---l_
+Architecture
+----------??ser messag _Architecture
+---ro---l_
+Archile) -> A----------- i------------
+User messag  ge------------
+User messag  La  
+Architecture
+---l_
+Architecture
+----------lfUser messagicArchitecture
+---] = {}
+        Arch._-----------on---  ---l_
+Archic Archsc----------- +Unt
+-------  --li---  ---l_skArchic Artr----t,User messag  User messag  La  
+ArchitecalArchitecture
+---  ---l_
+Archi AgentRo--------TOR: ---] = {}
+        Arch._-----------otR        AIArchic Archsc----------- +Unt
+------  -------  --li---  ---l_skArcliArchelArchionArchfi---------
+ -------y]]
+  --gen--ckpoint_ol -------y]]
+  --gen--ckpoin[r  --gen--cto  --gen------Pa  --g_path)from context.          self._graph = self._build_graph()
 
-# ── Catalog builder (shared with schema_retriever) ───────────────────────────
+    # Architectur  from context.                                  , Architecture
+----------el
+    # Architectur  from context.      onte------------
+User messag  ??-----------
+User messag  La  
+Architecture
+---l_
+A        self._cUser messag  La  
+ArchiteconArchitecture
+---r(---l_
+Archi.context----------?  ---ro---l_
+Archile) -> A----------- _iArchile) ef _previous_sql(self, connection_id: strUser messag  La  
+Architec  Architecture
+---to---l_
+Archiy_histor----------ln_---] = {}
+        Arch._-----------o0]        teArchic Archsc----------- +Unt
+------t(-------  --li---  ---l_skArc  ArchitecalArchitecture
+---  ---l_
+Archi AgentRo--------TOR: ---] = {}
+ ?--  ---l_
+Archi Agen?────        Arch._-----------otR      ??------  -------  --li---  ---l_skArcliArchelArchionArchfi---------e( -------y]]
+  --gen--ckpoint_ol -------y]]
+  --gen--ckpoin[r  --gte  --gen--con  --gen--ckpoin[r  --gen--tx_mg
+    # Architectur  from context.                                  , Architecture
+----------el
+    # Architectlog----------el
+    # Architectu       ctx = TaskContext(
+            connection_id=    # Archi  User messag  ??-----------
+User messag  La  
+Archite tUser messag  La  
+Architec  Architecture
+---ry---l_
+A       resulArchiteconArchitecture
+---r(---lTE---r(---l_
+Archi.cont    ctx,
+    Archile) -> A----------- _iArchile).gArchitec  Architecture
+---to---l_
+Archiy_histor----------ln_---] = {}
+        Arch._---------  ---to---l_
+Archiy_hisepArchiy_hixc        Arch._-----------o0]       n------t(-------  --li---  ---l_skArc  ArchitecalArchiteced", "error"---  ---l_
+Archi AgentRo--------TOR: ---] = {}
+ ?--  ---le(Archi AgeIn ?--  ---l_
+Archi Agen?───  Archi Agen??s  --gen--ckpoint_ol -------y]]
+  --gen--ckpoin[r  --gte  --gen--con  --gen--ckpoin[r  --gen--tx_mg
+    # Architectur  from context.      _t  --gen--ckpoin[r  --gte  --g{r    # Architectur  from context.                                    ----------el
+    # Architectlog----------el
+    # Architectu       ctx = TaskCoul    # Archi'r    # Architectu       ctx =  "            connection_id=    # Archi  U  User messag  La  
+Archite tUser messag  La  
+Architec  Architectu  Archite tUser meueArchitec  Architecture
+-- s---ry---l_
+A       re
+ A       r  ---r(---lTE---r(---l_
+Archi.cont  blArchi.cont    ctx,
+       Archile) -> Aac---to---l_
+Archiy_histor----------ln_---] = {}: AgentState) -> DArchiy_hiAn        Arch._---------  ---to---lctArchiy_hisepArchiy_hixc        ArcemArchi AgentRo--------TOR: ---] = {}
+ ?--  ---le(Archi Antent_obj = IntentType(state.get("intent", "query"))
+        except ValueError:
+  ?--  ---le(Archi AgeIn ?--  -.QArchi Agen?───  Archi Agen??s     --gen--ckpoin[r  --gte  --gen--con  --gen--ckpoin[r  --gen--tx_es    # Architectur  from context.      _t  --gen--ckpoin[r  --gte  qu    # Architectlog----------el
+    # Architectu       ctx = TaskCoul    # Archi'r    # Architectu       ctx =  "            connection_id=    # Archi sk    # Architectu       ctx =  pArchite tUser messag  La  
+Architec  Architectu  Archite tUser meueArchitec  Architecture
+-- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  Architectu  Arcta-- s---ry---l_
+A       re
+ A       r  ---r(---lTE        selectA       re
+ Apr A         Archi.cont  blArchi.cont    ctxget       Archile) -> Aac---to---   Archiy_histor----------ln_---] el ?--  ---le(Archi Antent_obj = IntentType(state.get("intent", "query"))
+        except ValueError:
+  ?--  ---le(Archi AgeIn ?--  -.QArchi Agen?───  Archi Agen f        except ValueError:
+  ?--  ---le(Archi AgeIn ?--  -.QArchi Ag:   ?--  ---le(Archi Agerma    # Architectu       ctx = TaskCoul    # Archi'r    # Architectu       ctx =  "            connection_id=    # Archi sk    # Architectu       ctx =  pArchite tUser messag  La  
+Architec  Architectu  Archite tUser meueArchitec  Architecturt(Architec  Architectu  Archite tUser meueArchitec  Architecture
+-- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  Architectu  Arcta-- s---ry---l_
+A       re
+ A       rSc-- s---ry---l_
+A       re
+ ")}
 
-_MAX_DESC = 150
+        if not result.success:
+A       re
+ Aeturn {"statuA       re
+ A       r  ---r(---lTE        selectA       re
+ Apr A   A       "a Apr A         Archi.cont  blArchi.cont    ctxle        except ValueError:
+  ?--  ---le(Archi AgeIn ?--  -.QArchi Agen?───  Archi Agen f        except ValueError:
+  ?--  ---le(Archi AgeIn ?--  -.QArchi Ag:   ?--  ---le(nd  ?--  ---le(Archi AgeIta  ?--  ---le(Archi AgeIn ?--  -.QArchi Ag:   ?--  ---le(Archi Agerma    # Architectu      ,
+Architec  Architectu  Archite tUser meueArchitec  Architecturt(Architec  Architectu  Archite tUser meueArchitec  Architecture
+-- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  Architectu  Arcta-- s---ry---l_
+A       re
+ A       rSc-- s---ry  -- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  Architectu  Arcta-- s---ry---l_
+A       re
+ A       rSc-- s---r
+ A       re
+ Achema_exploreA       re
+ A       rSc-- s---ry---l_
+A       re
+ ")}
 
+        ifs": "completeA       re
+ ")}
 
-def _build_table_catalog(schema: Dict[str, Any]) -> str:
-    """Build a compact one-line-per-table catalog for the merged IntentAgent."""
-    lines: List[str] = []
-    for tbl in schema.get("tables", []):
-        name = tbl["full_name"]
-        desc = (tbl.get("description") or "").replace("\n", " ").strip()
-        if len(desc) > _MAX_DESC:
-            desc = desc[:_MAX_DESC] + "…"
-        lines.append(f"{name} -- {desc}" if desc else name)
-    return "\n".join(lines)
+        ace": _append
+  aceA       re
+ Aeturn {"statuA  he Aeturn {e: A       r  ---r(---lTE _t Apr A   A       "a Apr A         Archi.cont      ?--  ---le(Archi AgeIn ?--  -.QArchi Agen?───  Archi Agen f        except ValueEe[  ?--  ---le(Archi AgeIn ?--  -.QArchi Ag:   ?--  ---le(nd  ?--  ---le(Archi AgeIta  ?tTArchitec  Architectu  Archite tUser meueArchitec  Architecturt(Architec  Architectu  Archite tUser meueArchitec  Architecture
+-- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  y=-- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  Architectu  Arcta-- s---ry---l_
+A       re
+ A       rSc-- s---rr_A       re
+ A   A       inA       re
+ A       rSc-- s---ry  -- s---ry---l_
+A       re
+ A   tables") or [A       re
+ A       r  ---r(---lTE])e.get("formatA       re
+ A       rSc-- s---r
+ A       re
+ Achema_exploreA     f. A       t( A       re
+ AchemaAT Achema_ex   A       rSc-- s---ry---  A       re
+ ")}
 
+        ex ")}
 
-class Orchestrator:
-    """
-    Main entry-point for the multi-agent system.
+   co
+  xt_ ")}
 
-    Instantiate once at app startup; call ``handle_message`` for each user turn.
-    """
+        ace": _append
+  ac  
+       aevious_sql=self._pr Aeturn {"statn_-- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  y=-- s---ry---l_
+A       re
+ A       r  ---r(---lTE])Architec  Architectu  Arcta-- s---ry---l_
+A       re
+ A       rSc-- s---rr_A       re
+ A   A       inA       re
+ A       rSc-- s---ry  -- s---ry---l_
+A       re
+ A   tables") or [A       re
+ A       r  ---r(---lTE])e.get("formatA       re
+ A       rSc-- s---r
+ A       re
+ Achema_exploreA     f. A       t(  {A       re
+ A"generated_sqA       re
+ A       r  ---r(---lTE])Architec  Arc _a A       ceA       re
+ A       rSc-- s---rr_A       re
+ A   A       inA     "s A       to A             ),
+        }
 
-    def __init__(
-        self,
-        schema_storage: SchemaStorage,
-        conversation_store: Optional[ConversationStore] = None,
-        context_budget: int = 12_000,
-    ):
-        self.schema_storage = schema_storage
-        self.store = conversation_store or ConversationStore()
+     A       rSc-- s---ry  - sA       re
+ A   tables") or [A      
+  A   tablx  A       r  ---r(---lTE])e.co A       rSc-- s---r
+ A       re
+ Achema_explor u A       re
+ Achemaer_message"],
+ AchemaAT Achema_ex   A       rSc-- s---ry--   ")}
 
-        # Per-connection context managers (connection_id → ContextWindowManager)
-        self._contexts: Dict[str, ContextWindowManager] = {}
+        ex ")}
 
-        # Pending tasks awaiting human confirmation (task_id → TaskContext)
-        self.pending_tasks: Dict[str, TaskContext] = {}
+   co
+  xt_ ")}
 
-        # Completed tasks (task_id → TaskContext) for post-hoc visualization
-        self._completed_tasks: Dict[str, TaskContext] = {}
-        self._MAX_COMPLETED_TASKS = 50  # evict oldest when exceeded
+        ace": _ap  
+  ect
+   co
+  xt_ te.  xt"selected_tab  ac  
+       aeviou )       A       re
+ A       r  ---r(---lTE])Architec  y=-- s---r
+        confA       re
+ A       r  ---r(---lTE])Architec  Arage
+ A         A       re
+ A       rSc-- s---rr_A       re
+ A   A       inA        A          A   A       inA       re
+ A   et A       rSc-- s---ry  ctx.validation_result else "?"
+        wa A   tablle A       r  ---r(---lTE])e.(" A       rSc-- s---r
+ A       re
+ Achema_explor
+  A       re
+ Achem          "vali A"generated_sqA       re
+ A       r  ---r(---   A       r  ---r(---lTE]": A       rSc-- s---rr_A       re
+ A   A       inA     "s A      A   A       inA     "s A      is        }
 
-        self.context_budget = context_budget
+     A       rSc-- s---ry  - sA       r      ),
+     A   tables") or [A      
+  A   tablx  e:  A   tablx  A       r  ,  A       re
+ Achema_explor u A       re
+ Achemaer_message"],= "rejected":
+ Achemaer_message"],
+ Ache_t AchemaAT Achema_exe(
+        ex ")}
 
-        # Lazy-init agents (created on first use so OPENAI_API_KEY can be set later)
-        self._agents: Dict[AgentRole, Any] = {}
+   co
+  xt_ ")}
 
-    # ── Agent factory ────────────────────────────────────────────────────
+        ace": _jec
+   co
+  xt_ , "  xtut
+ "
+         ect
+   co
+  xt_ as   c = state       aeviou )       A       rta A       r  ---r(---lTE])Architco        confA       re
+ A       r  ---r(---llf A       r  ---r(---lco A         A       re
+ A       rSc-- s-   A       rSc-- s---rs" A   A       inA        A       d A   et A       rSc-- s---ry  ctx.validation_result else _ap        wa A   tablle A       r  ---r(---lTE])e.(" A       }
+ A       re
+ Achema_explor
+  A       re
+ Achem          "vali A"gener   Achema_exue  A       re
+r_ Achem        A       r  ---r(---   A  
+            generate A   A       inA     "s A      A   A       inA     "s A      is        }
 
-    def _get_agent(self, role: AgentRole):
-        if role not in self._agents:
-            if role == AgentRole.INTENT:
-                self._agents[role] = IntentAgent()
-            elif role == AgentRole.SCHEMA:
-                self._agents[role] = SchemaAgent(schema_storage=self.schema_storage)
-            elif role == AgentRole.SQL_GENERATOR:
-                self._agents[role] = SQLGeneratorAgent()
-            elif role == AgentRole.VALIDATOR:
-                self._agents[role] = ValidationAgent()
-            elif role == AgentRole.EXECUTOR:
-                self._agents[role] = ExecutionAgent()
-            elif role == AgentRole.EXPLAINER:
-                self._agents[role] = ExplanationAgent()
-            elif role == AgentRole.VISUALIZER:
-                self._agents[role] = VisualizationAgent()
-            else:
-                raise ValueError(f"Unknown agent role: {role}")
-        return self._agents[role]
+     el
+     A       rSc-- s---ry  - sA       r      ),
+     A   tables") or [  except Exception as exc:
+            return {"sta  A   tablx  e:  A   tablx  (e Achema_explor u A       re
+ Achemaer_message"],= "ce Achemaer_message"],= "rejex Achemaer_message"],
+ Ache_t Acht  Ache_t AchemaAT Ac          ex ")}
 
-    # ── Context helpers ──────────────────────────────────────────────────
+   co
+  xt_ai
+   co
+  xt_ : r  xtt.error,
+       co
+  xt_ , "  agent_tr "
+         ectr ce   co
+  xt_xecute f A       r  ---r(---llf A       r  ---r(---lco A         A       re
+ A       rSc-- s-   A       rSc-- s---r,
+ A       rSc-- s-   A       rSc-- s---rs" A   A           state,
+    A       re
+ Achema_explor
+  A       re
+ Achem          "vali A"gener   Achema_exue  A       re
+r_ Achem        A       r  ---r(---   A  
+            generate A   A       i -> Dict[str, Any]:
+    Achema_exat  A       re
+") Achem     d"r_ Achem        A       r  ---r(---   A  
+                          generate A   A       inA    ("
+     el
+     A       rSc-- s---ry  - sA       r      ),
+     A   tables") or [  except Exc        A =     A   tables") or [  except Exception as ex"c            return {"sta  A   tablx  e:  A   tase Achemaer_message"],= "ce Achemaer_message"],= "rejex Achemaer_message"],
+ Ache_,
+ Ache_t Acht  Ache_t AchemaAT Ac          ex ")}
 
-    def _ctx_mgr(self, connection_id: str) -> ContextWindowManager:
-        if connection_id not in self._contexts:
-            # Cap context managers to prevent unbounded memory growth
-            if len(self._contexts) > 200:
-                oldest = next(iter(self._contexts))
-                del self._contexts[oldest]
-            self._contexts[connection_id] = ContextWindowManager(budget=self.context_budget)
-        return self._contexts[connection_id]
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_ai
+   co
+  xt_ : r  xtt.error,
+     )
+         co:
+   xt         co
+  xt_ , " (A  xt_ , .E         ectr ce  
+     xt_xecute f A   ion  A       rSc-- s-   A       rSc-- s---r,
+ A       rSc-- s-   A       rSc-- s---   A       rSc-- s-   A       rSc-- s---r e    A       re
+ Achema_explor
+  A       re
+ Achem          "valxp Achema_explo    A       re
+_t Achem     enr_ Achem        A       r  ---r(---   A  
+                          generate A   A       i -> Dite    Achema_exat  A       re
+") Achem     d"r_ Achem on") Achem     d"r_ Achem   on                          generate A   A       inA    (e[     el
+     A       rSc-- s---ry  - sA       r      ),       A       A   tables") or [  except Exc        A = er Ache_,
+ Ache_t Acht  Ache_t AchemaAT Ac          ex ")}
 
-    def _previous_sql(self, connection_id: str) -> Optional[str]:
-        """Return the last generated SQL for follow-up queries."""
-        history = self.store.get_query_history(connection_id, limit=1)
-        if history and history[0].get("generated_sql"):
-            return history[0]["generated_sql"]
-        return None
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_ai
+   co
+  xt_ : r  xtt.error,
+     )
+         co:
+   xt         co
+  xt_ , " (A  xt_ , .E         ectr ce  
+     xt_xec_config": ctx.visualization_config,
+            "agent_trace  xtap   co
+ra  io                co
+te  xt       )
+       Visualization:    xt      a.  xt_ , " (A  xt'     xt_xecute f A   ion  A       rSc--ze A       rSc-- s-   A       rSc-- s---   A       rSc-- s-   A   ge Achema_explor
+  A       re
+ Achem          "valxp Achema_explo    A       re
+_t Achem     enrr(  A       re
+   Achem      s_t Achem     enr_ Achem        A       r  ---r(-co                          generate A   A       i -> Dit, ") Achem     d"r_ Achem on") Achem     d"r_ Achem   on                       sql = s     A       rSc-- s---ry  - sA       r      ),       A       A   tables") or [  except Exc        A = er Ache_,
+ AchQL Ache_t Acht  Ache_t AchemaAT Ac          ex ")}
 
-    # ── Main entry point ─────────────────────────────────────────────────
+  et('row_count', 0)}\n"
+                f"{state.get('explanat
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_ai
+   co
+ sis  xt_message(r  io,    =sql)
+            xtlf     )
+         co:
+onv_id, "   xt       r  xt_ , " (A  xap     xt_xec_config": ctx.visualization_st            "agent_trace  xtap   co
+ra  io     ra  io                co
+te  xt   r_te  xt       )
+       V         Visualql  A       re
+ Achem          "valxp Achema_explo    A       re
+_t Achem     enrr(  A       re
+   Achem      s_t Achem     enr_ Achem        A       r  ---r(-co             id Achem       _t Achem     enrr(  A       re
+   Achem      s       Achem      s_t Achem     e   AchQL Ache_t Acht  Ache_t AchemaAT Ac          ex ")}
 
-    def handle_message(
-        self,
-        connection_id: str,
+  et('row_count', 0)}\n"
+                f"{state.get('explanat
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_ai
+   co
+ sis  xt_message(r  io,    =sql)
+            xtlf     )
+         co:
+onv_id, "   xt       r  xt_ , " (A  xap     xt_xec_config": ctx.visualization_st   ,
+
+  et('row_count', 0)}\n"
+                f"{state.ge_id                f"{stat     co
+  xt_ai
+   co
+  io
+   co
+  xt_aouting ?  co
+??  io??   ?─?  co
+??sis??           xtlf     )
+        ??        co:
+onv_id, ??onv_id, "  ??a  io     ra  io                co
+te  xt   r_te  xt       )
+       V         Visualql  A       re
+ Achem        ntte  xt   r_te  xt       )
+       Vt(       V         Visualq   Achem          "valxp Achema_explo  i_t Achem     enrr(  A       re
+   Achem      s_tin   Achem      s_t Achem     e):   Achem      s       Achem      s_t Achem     e   AchQL Ache_t Acht  Ache_t AchemaAT Ac          ex ")}
+
+  et('row_count'f 
+  et('row_count', 0)}\n"
+                f"{state.get('explanat
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_aier_                f"{staten   co
+  xt_ai
+   co
+  io
+   co
+  xt_a_node" i   co
+e.get("status") in ("failed sisre            xtlf     )
+ ode"
+
+            co:
+onv_id, laonv_id, "  at
+  et('row_count', 0)}\n"
+                f"{state.ge_id                f"{stat    isu                f"{stat"
+  xt_ai
+   co
+  io
+   co
+  xt_aouting ?  co
+??  io??   ???   co
+? io──? xt?─  io??   ?──??sis??           xtl??       ??        co:
+onv_id?nv_id, ??onv_id, "  ??e  xt   r_te  xt       )
+       V         Visualql  A   St       V         Visualq   Achem        ntte  xt   r_te  xt   se       Vt(       V         Visualq   Ache(   Achem      s_tin   Achem      s_t Achem     e):   Achem      s       Achem      s_t Achem     e   Acno
+  et('row_count'f 
+  et('row_count', 0)}\n"
+                f"{state.get('explanat
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_aier_                f"{s"execute_no  et('row_count',e_                f"{statdd   co
+  xt_ai
+   co
+  io
+   co
+  xt_aod  xt     co
+uilder.add_no  xtvi  xt_ai
+   co
+  io
+   co
+  xt_a_node" i      buil  ioadd_node("fine.get("status") iina ode"
+
+            co:
+onv_id, laonv_id, "  at
+  et('r)
+
+      onv_id, laonv_co  et('row_count', 0)}\                  f"{sta     xt_ai
+   co
+  io
+   co
+  xt_aouting ?  co
+??  io??   ???   co
+? io──?hema   co
+,
+             xt "??  io??   ???ode"? io──? re_nodeonv_id?nv_id, ??onv_id, "  ??e  xt   r_te  xt       )
+       V         Visualql  Aal       V         Visualql  A   St       V         Visuage  et('row_count'f 
+  et('row_count', 0)}\n"
+                f"{state.get('explanat
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_aier_                f"{s"execute_no  et('row_count',e_                f"{statdd   co
+  xt_ai
+   co
+  io
+   co
+  xt_aod  xt dd  et('row_count',s(                f"{statod   co
+  xt_ai
+   co
+  io
+   co
+  xt_acu  x
+     co
+    {"ex   in  xte"  xt_ai
+   co
+  io
+   co
+  xt_aod  xt     co
+uilder.add_no  xtvi  xilder.add_conditional_edges(
+     io     "explainuilder.add_no  xtv     co
+  io
+   co
+  xt_a_n,
+            {"vis
+            co:
+onv_id, laonv_id, "  at
+  et('r)
+
+      onv_id,    onv_id, laonv_ld  et('r)
+
+      onv_id_node", "fin   co
+  io
+   co
+  xt_aouting ?  co
+??  io??   ???   co
+? io──?hema.compile           ??  io??   ??=self._checkpointer,
+      ,
+             xt "?? =["e       V         Visualql  Aal       V         Visualql  A   St       V         Visuage  et('row       return {"conf  et('row_count', 0)}\n"
+                f"{state.get('explanat
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_aier?               f"{stat??   co
+  xt_ai
+   co
+  io
+   co
+  xt_a??────? io?  ?──? xt_ai
+   co
+  io
+   co
+  xt_aod  xt dd  et('row_count',s(                f"{statod   co?  co
+?──?  ??  xt??  xt_ai
+   co
+  io
+   co
+  xt_acu  x
+     co
+    {"ex   in  xte───? io??  ??  xt??     co
+  ??──?  co
+  io
+   co
+  xt_aod? io──? xt??ilder.add_no  xtvef     io     "explainuilder.add_no  xtv     co
+  i_i   str,
         user_message: str,
-        db_connection: Optional[DatabaseConnection] = None,
-    ) -> Dict[str, Any]:
-        """
-        Process a user message end-to-end (or up to an HITL pause).
+        db_connection:        l[            co:
+ononv_id, laonv_)   et('r)
 
-        Returns a dict with:
-          - status: completed | awaiting_confirmation | clarification_needed | error
-          - task_id
-          - generated_sql, results, explanation (when available)
-          - confirmation_message (when HITL pause)
-          - agent_trace: list of agent messages
-        """
-        # ── Auto-reject any stale pending tasks for this connection ──────
-        stale_ids = [
-            tid
-            for tid, t in list(self.pending_tasks.items())
-            if t.connection_id == connection_id
-        ]
-        for tid in stale_ids:
-            self.pending_tasks.pop(tid, None)
-            logger.info("Auto-rejected stale pending task %s", tid)
+      onv     
+      _id
+      onv_id_node", "fin   co
+  io
+   c= s  io
+   co
+  xt_aouting ?       db  xtne??  io??   ???   s? io──?hema.cta      ,
+             xt "?? =["e       V         Visualql  Aal       V =       ne                f"{state.get('explanat
+   co
+  xt_ai
+   co
+  io
+   co
+  xt_aier?               f"{stat??   co
+  xt_ai
+   co
+  io
+   co
+  xt_a??────? io     co
+  xt_ai
+   co
+  io
+   co
+  xt_a"u  xt,    co
+es  io)
+       xtin  xt_ai
+   co
+  io
+   co
+  xt_a??──?tion_id":  ione   on  xt
+    co
+  io
+   co
+  xt_aod  xt dd  et('row_cou    io     sk_id": ?──?  ??  xt??  xt_ai
+   co
+  io
+   co
+  xt_acu  x
+     co
+    {"gr   co
+  io
+   co
+  xt_acutr  io:    
+   xt       co
+  ct    {"le  ??──?  co
+  io
+   co
+  xt_aod? io──? }  io
+   co
+  xt_:    nt  xte   i_i   str,
+        user_message: str,
+        db_connection:        l[            co:
+ono          useho        db_connection:   n {
+                "status": "awaiting_confirmati
+      onv     
+      _idk_i      _id
+           on    io
+   c= s  io
+   co
+  xt_te   ),   co
+  xt       "             xt "?? =["e       V         Visualql  Aal       V =       ne     sa   co
+  xt_ai
+   co
+  io
+   co
+  xt_aier?               f"{stat??   co
+  xt_ai
+   co
+  io
+   co
+  xt_a??─?         "agent  ioce   re  xt.g  xt_ai
+   co
+  io
+   co
+  xt_a??──?     retu  ioel   build_fi  xt_ai
+   co
+  io
+  
+    def conf   co
+sk(
+        s  xt
+ es  io)
+       xtir,
+        db_connection: Opt onal[   ab  xton    co
+  io
+   co
+  xt_aod  xt dd  et('Optional[   ] = None   co
+  io
+   co
+  xt_acu  x
+     co
+    {"gr   co
+  io
+   co
+  xt_acutr  snapsh   =   xt._graph.get_st    {"nf  io
+   co
+ if   t   xtsh   xt       co
+  c    ct    {"le ta  io
+   co
+  xt_aod? io─k     f  xt o   co
+  xt_:    nt  xte   i    xtf         user_message:      self        db_connection:    =ono          useho        db_connection:   n {va                "status": "awaiting_confirmatco      onv              self._db_connections[con      _idk_i nn           on   if mod   c= s  io
+   co
+     co
+  xtra  xtpd  xt       "    ,   xt_ai
+   co
+  io
+   co
+  xt_aier?               f"{stat??   co
+  xt_ai
+   co
+  io
+   co
+  xt        se  iost   _c  xtet  xt_ai
+   co
+  io
+   co
+  xt_a??─?  _build_fin  _res   se(resul   co
+  io
+   co
+  xt_a??──?     retu  ioel    s  io "   -> Dict[   co
+  io
+  
+    def conf   co
+sk(
+        s  x)
+  io    
+na shsk(
+        s  x.g  _s es  io)
+   
+        if        db_ot  io
+   co
+  xt_aod  xt dd  et('Optional[   ] = "e  or"  xTas  io
+   co
+  xt_acu  x
+     co
+    {"gr   co
+co   id  xtnapshot.values    {"co  io
+   co
+ , "")
+          co
+ if   t   xtsh   xt       co
+  c    ct    {"lehot.valu  c    ct    {"le ta  io
+  to   co
+  xt_aod? io─sa  xt(c  xt_:    nt  xte   i    xtf      e_   co
+     co
+  xtra  xtpd  xt       "    ,   xt_ai
+   co
+  io
+   co
+  xt_aier?               f"{stat??   co
+  xt_ai
+   co
+  io
+   co
+  xt        se  iost   _c  xtet  xt_ai
+   co
+  io
+   co
+  xt_a??─?  _build_fin  _res   se(resul   co
+  io
+   co
+  xt_a??──?     retu_m    ge(conv_id   co
+  io
+   co
+  xt_aier?       return {       xt    xt_ai
+   co
+  io
+   co
+  xt        se k_id": tas  io,
+       xt     co
+  io
+   co
+  xt_a??─?  _builed_sql")             io
+   co
+  xt_a??──?     retu  ioel    ),
+      xt}
+  io
+  
+    def conf   co
+sk(
+        s  x)
+  io    
+na sAn  
 
-        ctx = TaskContext(connection_id=connection_id, user_query=user_message)
-        ctx.status = TaskStatus.IN_PROGRESS
+    sk(
+        s  x._  mp  io    
+na get(task_id            
+        if        db_         crn {"status": "error", "  xtr"   co
+  xt_acu  x
+     co
+    {"gr   co
+co   id  xtnale  xtqu     co
+        ctx co   id  xtnt(   co
+ , "")
+          co
+ if   t   ("connection_id if   t   x    c    ct    {"lehot.valu t("  to   co
+  xt_aod? io─sa  xt(c  xt_:    nt 
+   xt_aod       co
+  xtra  xtpd  xt       "    ,   xt_ai
+   co
+  io
+   co
+  ("generate   co
+  io
+   co
+  xt_aier?       t=  ioe.   ("  xtut  xt_ai
+   co
+  io
+   co
+  xt        se  s   co
+et  iont(Agen  xte.   co
+  io
+   co
+  xt_a??─?  _builesult.su   ss:
+            return {"status": "error", "error": resu   er  xtor  io
+   co
+  xt_aier?       return {                "sta   co
+  io
+   co
+  xt        se k_id": tas  sk_id,
+                   xt     co
+  io
+   co
+ at  io
+   co
+  xt         xtha   co
+  xt_a??──?     retu  ioel    )0)  xt        xt}
+  io
+  
+    def conf   co
+────  
+─?k(
+        s  x──  io    
+na ─────────?a get(task_id           ?       if        db_    ? xt_acu  x
+     co
+    {"gr   co
+co   id  xtnale  xtqu     co
+  on     co
+  li    {"nt = 50) -> Dict        ctx
+        conv_id = , "")
+          co
+ if   t nver     n( if   t   (id  xt_aod? io─sa  xt(c  xt_:    nt 
+   xt_aod       co
+  xtra  xtpd  xt re   xt_aod       co
+  xtra  xtpd  xt  ss  xtra  xtpd  xt 
+    co
+  io
+   co
+  ("generate   co
+ ction_id   tr  ("mi  io
+   co
+  xt_list:
+   xt     co
+  io
+   co
+  xt        se  s   co
+et  io  io,    it  xtitet  iont(Agen  xte.  er  io
+   co
+  xt_a??─?id: st  xt>             return.store.clear_conv   co
+  xt_aier?       return {                "sta   co
+  io
+  :
+  xt    io
+   co
+  xt        se k_id": tas  sk_id,
+      f    _c  xtrs                   xt     co
+  i->  io
+   co
+ at  io
+   co
+  _i   n  at ._   co
+ts  xt    xt_a??──?     s[  io
+  
+    def conf   co
+────  
+─?k(
+  _c  
+er at────  
+?)─?k(
+    ? Private hna ───────??     co
+    {"gr   co
+co   id  xtnale  xtqu     co
+  on     co
+  li    {"nt = 50) -> Dict       ??   {"??co   id  xtn? on     co
+  li    {"nt = re  li    {"(s        conv_id = , "ate: AgentState)           co
+ if   t n_c if   t nvesk   xt_aod       co
+  xtra  xtpd  xt re   xt_aod       co
+  xtra  xtpdCO  xtra  xtpd  xt     xtra  xtpd ompleted_tasks[next(iter(    co
+  io
+   co
+  ("generate   coicm  io
 
-        # Record user message in context window + persistent store
-        cm = self._ctx_mgr(connection_id)
-        cm.add_user_message(user_message)
-        conv_id = self.store.get_or_create_conversation(connection_id)
-        self.store.add_message(conv_id, "user", user_message)
+    def _bui ction_id   tr  e(   co
+  xt_list:
+   xt Di  xttr, Any]:
+        status =   su  xtetet  io  io,    it  xt")   co
+  xt_a??─?id: st  xt>             returnat  xt s  xt_aier?       return {                "sta   co
+  io
+  :
+      io
+  :
+  xt    io
+   co
+  xt        se k_id": taserated_  l": result.ge  xten      f    _c  xtrs             na  i->  io
+   co
+ at  io
+   co
+  _i   n  at ._ "a   co
+ ace at esult.get(  _intts  xt    xt_a??─    
+    def conf   co
+──── n_res────      ─?k(
+  _cs"  _c  
+uler atec?)─?k(
+    ? ("    ? Priv[]    {"gr   co
+co   id  xtnale  xtqu     co
+  on ioco   id  xtnet  on     co
+  li    {"nt =  r  li    {""v  li    {"nt = re  li    {"(s        conv_id = , "ate: AgentState) vi if   t n_c if   t nvesk   xt_aod       co
+  xtra  xtpd  xt re   xt_aod        r  xtra  xtpd  xt re   xt_aod       co
+  x
+   xtra  xtpdCO  xtra  xtpd  xt     x    io
+   co
+  ("generate   coicm  io
 
-        # ── Build table catalog for intent classification only ────────────
-        schema = self.schema_storage.load_schema(connection_id)
-
-        # 1. Intent classification (1 LLM call — no table selection here)
-        try:
-            intent_result = self._run_agent(
-                AgentRole.INTENT,
-                ctx,
-                conversation_summary=cm.get_summary(),
-            )
-        except Exception as exc:
-            return self._error_response(ctx, f"Intent classification failed: {exc}")
-
-        if not intent_result.success:
-            return self._error_response(ctx, intent_result.error or "Intent classification failed")
-
-        # Handle non-pipeline intents immediately
-        if ctx.intent in (IntentType.CLARIFY, IntentType.GENERAL):
-            reply = intent_result.data.get("refined_query", "Could you clarify your request?")
-            cm.add_assistant_message(reply)
-            self.store.add_message(conv_id, "assistant", reply)
-            ctx.status = TaskStatus.COMPLETED
-            return self._build_response(ctx, status="clarification_needed")
-
-        # Handle schema_explore directly
-        if ctx.intent == IntentType.SCHEMA_EXPLORE:
-            schema_result = self._run_agent(AgentRole.SCHEMA, ctx)
-            if schema_result.success:
-                reply = f"Found {schema_result.data.get('total_tables', 0)} tables."
-                cm.add_assistant_message(reply)
-                self.store.add_message(conv_id, "assistant", reply)
-                ctx.status = TaskStatus.COMPLETED
-                return self._build_response(ctx, extra_data=schema_result.data)
-            return self._error_response(ctx, schema_result.error or "Schema retrieval failed")
-
-        # Handle explain intent
-        if ctx.intent == IntentType.EXPLAIN:
-            explain_result = self._run_agent(AgentRole.EXPLAINER, ctx)
-            reply = ctx.explanation or "Unable to generate explanation."
-            cm.add_assistant_message(reply)
-            self.store.add_message(conv_id, "assistant", reply)
-            ctx.status = TaskStatus.COMPLETED
-            return self._build_response(ctx)
-
-        # 2. Schema retrieval via dedicated SchemaAgent (RAG-based, 1 LLM call)
-        schema_result = self._run_agent(AgentRole.SCHEMA, ctx)
-        if not schema_result.success:
-            return self._error_response(ctx, schema_result.error or "Schema retrieval failed")
-
-        # 3. SQL generation (1 LLM call)
-        sql_result = self._run_agent(
-            AgentRole.SQL_GENERATOR,
-            ctx,
-            conversation_context=cm.get_context_string(max_tokens=3000),
-            previous_sql=self._previous_sql(connection_id),
-        )
-        if not sql_result.success:
-            return self._error_response(ctx, sql_result.error or "SQL generation failed")
-
-        # 4. Validation (rule-based, no LLM)
-        val_result = self._run_agent(AgentRole.VALIDATOR, ctx)
-        if not val_result.success:
-            return self._error_response(ctx, val_result.error or "Validation failed")
-
-        # 5. ALWAYS pause for HITL confirmation
-        ctx.status = TaskStatus.AWAITING_CONFIRMATION
-        ctx.needs_confirmation = True
-        ctx.confirmation_message = (
-            val_result.confirmation_message
-            or "Please review the generated SQL and confirm execution."
-        )
-        self.pending_tasks[ctx.task_id] = ctx
-        # Store db_connection info for later
-        if db_connection:
-            ctx.add_message("system", "__db_ref__", metadata={"_db_ref": True})
-        return self._build_response(ctx, status="awaiting_confirmation")
-
-    # ── Visualization on completed tasks ─────────────────────────────────
-
-    def visualize_task(self, task_id: str) -> Dict[str, Any]:
-        """Generate visualizations for a previously completed task stored in _completed_tasks."""
-        ctx = self._completed_tasks.get(task_id)
-        if ctx is None:
-            return {"status": "error", "error": "Task not found. Visualization must be requested on a completed query."}
-        return self._visualize_results(ctx)
-
-    # ── Confirmation handlers ────────────────────────────────────────────
-
-    def confirm_task(
-        self,
-        task_id: str,
-        db_connection: Optional[DatabaseConnection] = None,
-        modified_sql: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """User confirms (or modifies) a pending task → execute it."""
-        ctx = self.pending_tasks.pop(task_id, None)
-        if ctx is None:
-            return {"status": "error", "error": "Task not found or already processed."}
-
-        if modified_sql:
-            ctx.generated_sql = modified_sql
-            ctx.add_message("user", f"Modified SQL to:\n{modified_sql}")
-
-        ctx.status = TaskStatus.CONFIRMED
-        cm = self._ctx_mgr(ctx.connection_id)
-        conv_id = self.store.get_or_create_conversation(ctx.connection_id)
-
-        if db_connection is None:
-            return self._error_response(ctx, "No active database connection")
-
-        return self._execute_and_explain(ctx, db_connection, conv_id, cm)
-
-    def reject_task(self, task_id: str, reason: str = "") -> Dict[str, Any]:
-        """User rejects a pending task."""
-        ctx = self.pending_tasks.pop(task_id, None)
-        if ctx is None:
-            return {"status": "error", "error": "Task not found or already processed."}
-
-        ctx.status = TaskStatus.REJECTED
-        cm = self._ctx_mgr(ctx.connection_id)
-        conv_id = self.store.get_or_create_conversation(ctx.connection_id)
-
-        reply = "Query cancelled by user."
-        if reason:
-            reply += f" Reason: {reason}"
-        cm.add_assistant_message(reply)
-        self.store.add_message(conv_id, "assistant", reply)
-
-        self.store.add_query_history(
-            connection_id=ctx.connection_id,
-            user_query=ctx.user_query,
-            generated_sql=ctx.generated_sql,
-            status="rejected",
-            conversation_id=conv_id,
-            task_id=ctx.task_id,
-        )
-
-        return self._build_response(ctx, status="rejected")
-
-    # ── History / context endpoints ──────────────────────────────────────
-
-    def get_conversation_history(
-        self, connection_id: str, limit: int = 50
-    ) -> Dict[str, Any]:
-        conv_id = self.store.get_or_create_conversation(connection_id)
-        messages = self.store.get_messages(conv_id, limit=limit)
-        return {"conversation_id": conv_id, "messages": messages}
-
-    def get_query_history(
-        self, connection_id: str, limit: int = 20
-    ) -> list:
-        return self.store.get_query_history(connection_id, limit=limit)
-
-    def clear_conversation(self, connection_id: str) -> None:
-        self.store.clear_conversation(connection_id)
-        if connection_id in self._contexts:
-            self._contexts[connection_id].clear()
-
-    def new_conversation(self, connection_id: str) -> str:
-        """Start a fresh conversation thread (keeps history of old ones)."""
-        if connection_id in self._contexts:
-            self._contexts[connection_id].clear()
-        return self.store.new_conversation(connection_id)
-
-    # ── Internals ────────────────────────────────────────────────────────
-
-    def _run_agent(self, role: AgentRole, ctx: TaskContext, **kwargs: Any) -> AgentResult:
-        agent = self._get_agent(role)
-        logger.info("Running %s agent for task %s", role.value, ctx.task_id)
-        try:
-            return agent.run(ctx, **kwargs)
-        except RuntimeError as exc:
-            logger.error("Agent %s failed for task %s: %s", role.value, ctx.task_id, exc)
-            ctx.add_message("system", f"Agent {role.value} error: {exc}", agent=role.value)
-            return AgentResult(success=False, error=str(exc))
-
-    def _execute_and_explain(
-        self,
-        ctx: TaskContext,
-        db_connection: DatabaseConnection,
-        conv_id: str,
-        cm: ContextWindowManager,
-    ) -> Dict[str, Any]:
-        """Execute SQL and get explanation — shared by handle_message and confirm_task."""
-        exec_result = self._run_agent(AgentRole.EXECUTOR, ctx, db_connection=db_connection)
-        if not exec_result.success:
-            self.store.add_query_history(
-                connection_id=ctx.connection_id,
-                user_query=ctx.user_query,
-                generated_sql=ctx.generated_sql,
-                status="failed",
-                error=exec_result.error,
-                conversation_id=conv_id,
-                task_id=ctx.task_id,
-            )
-            return self._error_response(ctx, exec_result.error or "Execution failed")
-
-        # Explanation
-        self._run_agent(AgentRole.EXPLAINER, ctx)
-
-        # Visualization (if user requested it)
-        if ctx.intent == IntentType.VISUALIZE:
-            self._run_agent(AgentRole.VISUALIZER, ctx)
-
-        # Update context window
-        assistant_reply = (
-            f"SQL: {ctx.generated_sql}\n"
-            f"Rows: {exec_result.data.get('row_count', 0)}\n"
-            f"{ctx.explanation or ''}"
-        )
-        cm.add_assistant_message(assistant_reply, sql=ctx.generated_sql)
-
-        # Persist
-        self.store.add_message(conv_id, "assistant", assistant_reply, agent="orchestrator")
-        self.store.add_query_history(
-            connection_id=ctx.connection_id,
-            user_query=ctx.user_query,
-            generated_sql=ctx.generated_sql,
-            row_count=exec_result.data.get("row_count"),
-            status="completed",
-            conversation_id=conv_id,
-            task_id=ctx.task_id,
-        )
-
-        # Persist context summary
-        summary = cm.get_summary()
-        if summary:
-            self.store.update_conversation_summary(conv_id, summary)
-
-        ctx.status = TaskStatus.COMPLETED
-        self._completed_tasks[ctx.task_id] = ctx
-        # Evict oldest completed tasks if limit exceeded
-        if len(self._completed_tasks) > self._MAX_COMPLETED_TASKS:
-            oldest = next(iter(self._completed_tasks))
-            del self._completed_tasks[oldest]
-        return self._build_response(ctx)
-
-    def _visualize_results(self, ctx: TaskContext) -> Dict[str, Any]:
-        """Run visualization agent on already-executed results."""
-        viz_result = self._run_agent(AgentRole.VISUALIZER, ctx)
-        if not viz_result.success:
-            return {"status": "error", "error": viz_result.error or "Visualization failed"}
-        return {
-            "status": "completed",
-            "task_id": ctx.task_id,
-            "visualization": viz_result.data.get("visualization"),
-            "chart_count": viz_result.data.get("chart_count", 0),
-            "agent_trace": [
-                {"role": m.role, "content": m.content, "agent": m.agent}
-                for m in ctx.messages
-            ],
-        }
-    def _build_response(
-        self,
-        ctx: TaskContext,
-        status: Optional[str] = None,
-        extra_data: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        resp: Dict[str, Any] = {
-            "status": status or ctx.status.value,
-            "task_id": ctx.task_id,
-            "intent": ctx.intent.value if ctx.intent else None,
-            "generated_sql": ctx.generated_sql,
-            "explanation": ctx.explanation,
-            "agent_trace": [
-                {"role": m.role, "content": m.content, "agent": m.agent}
-                for m in ctx.messages
-            ],
-        }
-        if ctx.execution_result:
-            resp["results"] = ctx.execution_result.get("results", [])
-            resp["row_count"] = ctx.execution_result.get("row_count", 0)
-        if ctx.visualization_config:
-            resp["visualization"] = ctx.visualization_config
-        if ctx.needs_confirmation:
-            resp["confirmation_message"] = ctx.confirmation_message
-            resp["validation"] = ctx.validation_result
-        if extra_data:
-            resp.update(extra_data)
-        return resp
-
-    def _error_response(self, ctx: TaskContext, error: str) -> Dict[str, Any]:
-        ctx.status = TaskStatus.FAILED
-        ctx.error = error
-        return self._build_response(ctx, status="error") | {"error": error}
+    def _bui ction_id   tr  e(   co
+  x

@@ -123,14 +123,14 @@ az containerapp create \
   --resource-group sqlagent-rg \
   --environment sqlagent-env \
   --image sqlagentacr.azurecr.io/sqlagent-frontend:latest \
-  --target-port 8501 \
+  --target-port 3000 \
   --ingress external \
   --cpu 0.5 --memory 1.0Gi \
   --min-replicas 1 \
   --max-replicas 5 \
   --registry-server sqlagentacr.azurecr.io \
   --env-vars \
-    API_URL=https://sqlagent-backend.<your-env>.azurecontainerapps.io
+    NEXT_PUBLIC_API_BASE_URL=https://sqlagent-backend.<your-env>.azurecontainerapps.io
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -148,5 +148,5 @@ az containerapp create \
 #   - Azure Container Apps with auto-scaling (10+ replicas)
 #   - Azure Cache for Redis (shared session state)
 #   - Azure Front Door (CDN + load balancing)
-#   - Replace Streamlit frontend with React/Next.js
+#   - Frontend is already Next.js (migrated from Streamlit)
 #   - Azure SQL elastic pool or read replicas

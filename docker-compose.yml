@@ -14,7 +14,7 @@ services:
       - PORT=8000
       - SQLAGENT_RELOAD=0
       - SQLAGENT_WORKERS=4
-      - ALLOWED_ORIGINS=http://localhost:8501,http://localhost:${FRONTEND_PORT:-8501}
+      - ALLOWED_ORIGINS=http://localhost:3000,http://localhost:${FRONTEND_PORT:-3000}
       - MAX_CONNECTIONS=100
       - DB_POOL_SIZE=20
       - LLM_CACHE_ENABLED=1
@@ -30,9 +30,9 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "${FRONTEND_PORT:-8501}:8501"
+      - "${FRONTEND_PORT:-3000}:3000"
     environment:
-      - API_URL=http://backend:8000
+      - NEXT_PUBLIC_API_BASE_URL=http://localhost:${BACKEND_PORT:-8001}
     depends_on:
       backend:
         condition: service_healthy
