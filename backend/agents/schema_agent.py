@@ -54,7 +54,7 @@ class SchemaAgent(BaseAgent):
 
         # For query / followup / export: RAG retrieval
         query_text = ctx.refined_query or ctx.user_query
-        relevant = retrieve_relevant_schema(schema, query_text, top_k=5, fk_neighbor_depth=0)
+        relevant = retrieve_relevant_schema(schema, query_text, top_k=5, fk_neighbor_depth=1)
 
         ctx.relevant_schema = relevant
         ctx.selected_tables = [t["full_name"] for t in relevant.get("tables", [])]
