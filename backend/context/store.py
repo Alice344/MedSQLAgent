@@ -243,7 +243,7 @@ class ConversationStore:
     ) -> List[Dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT user_query, generated_sql, row_count, status, error, created_at "
+                "SELECT task_id, user_query, generated_sql, row_count, status, error, created_at "
                 "FROM query_history WHERE connection_id = ? ORDER BY created_at DESC LIMIT ?",
                 (connection_id, limit),
             ).fetchall()
