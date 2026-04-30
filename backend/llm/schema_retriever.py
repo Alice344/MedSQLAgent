@@ -7,6 +7,7 @@ from collections import Counter, defaultdict
 from typing import Any, Dict, List, Set
 
 from table_docs.chunk_retriever import retrieve_relevant_doc_chunks
+from table_docs.merge_rules import CHUNK_CANDIDATE_MULTIPLIER
 
 logger = logging.getLogger(__name__)
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
@@ -24,9 +25,10 @@ def _expand_tables_by_fk(
     all_tables: List[Dict[str, Any]],
     foreign_keys: List[Dict[str, Any]],
     depth: int,
+    max_tables: int,
 ) -> List[str]:
     if depth <= 0 or not selected_names:
-        return selected_names
+        return selected_names[:max_tables]
 
     table_by_name = {table["full_name"]: table for table in all_tables}
     degree = Counter()
@@ -67,9 +69,15 @@ def _expand_tables_by_fk(
         if not frontier:
             break
         ordered_frontier = [candidate for _, candidate in ranked_neighbors if candidate in frontier]
-        expanded.extend(ordered_frontier)
-        expanded_set.update(frontier)
-    return expanded
+        for candidate in ordered_frontier:
+            if len(expanded) >= max_tables:
+                return expanded[:max_tables]
+            expanded.append(candidate)
+            expanded_set.add(candidate)
+        frontier = set(ordered_frontier)
+        if len(expanded) >= max_tables:
+            break
+    return expanded[:max_tables]
 
 
 def retrieve_relevant_schema(
@@ -89,7 +97,8 @@ def retrieve_relevant_schema(
     all_fks = schema.get("foreign_keys", [])
     table_by_name: Dict[str, Dict[str, Any]] = {t["full_name"]: t for t in all_tables}
 
-    chunks = retrieve_relevant_doc_chunks(query, top_k=top_k)
+    chunk_target = max(top_k, top_k * CHUNK_CANDIDATE_MULTIPLIER)
+    chunks = retrieve_relevant_doc_chunks(query, top_k=chunk_target)
     logger.info("Retrieved %d relevant markdown chunks", len(chunks))
 
     selected_table_names: List[str] = []
@@ -102,13 +111,15 @@ def retrieve_relevant_schema(
                 if full_name not in seen_selected:
                     selected_table_names.append(full_name)
                     seen_selected.add(full_name)
+                    if len(selected_table_names) >= top_k:
+                        break
                 break
+        if len(selected_table_names) >= top_k:
+            break
 
     if not selected_table_names:
         logger.warning("No table docs matched query; falling back to first %d schema tables", top_k)
         selected_table_names = [t["full_name"] for t in all_tables[:top_k]]
-
-    selected_table_names = selected_table_names[:top_k]
 
     expanded_table_names = _expand_tables_by_fk(
         query,
@@ -116,6 +127,7 @@ def retrieve_relevant_schema(
         all_tables,
         all_fks,
         fk_neighbor_depth,
+        max_tables=top_k,
     )
     selected = [table_by_name[name] for name in expanded_table_names if name in table_by_name]
     selected_set = {table["full_name"] for table in selected}
