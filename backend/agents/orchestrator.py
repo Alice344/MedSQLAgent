@@ -151,27 +151,20 @@ class Orchestrator:
         if not validation_result.success:
             return self._error_response(ctx, validation_result.error or "SQL validation failed.")
 
-        if validation_result.needs_confirmation:
-            ctx.status = TaskStatus.AWAITING_CONFIRMATION
-            ctx.needs_confirmation = True
-            ctx.confirmation_message = validation_result.confirmation_message
-            self._pending_tasks[ctx.task_id] = ctx
+        ctx.status = TaskStatus.AWAITING_CONFIRMATION
+        ctx.needs_confirmation = True
+        ctx.confirmation_message = self._build_confirmation_message(validation_result)
+        self._pending_tasks[ctx.task_id] = ctx
 
-            review_msg = "I've generated SQL for your request. Please review before execution."
-            self._persist_assistant_message(connection_id, conversation_id, review_msg, ctx)
-            return {
-                "status": "awaiting_confirmation",
-                "task_id": ctx.task_id,
-                "generated_sql": ctx.generated_sql,
-                "confirmation_message": validation_result.confirmation_message,
-                "agent_trace": self._agent_trace(ctx),
-            }
-
-        return self._execute_and_finalize(
-            ctx=ctx,
-            db_connection=db_connection,
-            conversation_id=conversation_id,
-        )
+        review_msg = "I've generated SQL for your request. Please review or modify it before execution."
+        self._persist_assistant_message(connection_id, conversation_id, review_msg, ctx)
+        return {
+            "status": "awaiting_confirmation",
+            "task_id": ctx.task_id,
+            "generated_sql": ctx.generated_sql,
+            "confirmation_message": ctx.confirmation_message,
+            "agent_trace": self._agent_trace(ctx),
+        }
 
     def confirm_task(
         self,
@@ -190,6 +183,9 @@ class Orchestrator:
                 "User provided modified SQL for execution.",
                 agent=AgentRole.ORCHESTRATOR.value,
             )
+            validation_result = self.validation_agent.run(ctx)
+            if not validation_result.success:
+                return {"status": "error", "error": validation_result.error or "Modified SQL validation failed."}
 
         ctx.status = TaskStatus.CONFIRMED
         conversation_id = self.conversation_store.get_or_create_conversation(ctx.connection_id)
@@ -368,6 +364,14 @@ class Orchestrator:
             return None
         sql = history[0].get("generated_sql")
         return str(sql) if sql else None
+
+    @staticmethod
+    def _build_confirmation_message(validation_result: AgentResult) -> str:
+        base = "Please review the generated SQL before execution. You can confirm it as-is or modify it first."
+        extra = (validation_result.confirmation_message or "").strip()
+        if extra:
+            return f"{base}\n\n{extra}"
+        return base
 
     @staticmethod
     def _agent_trace(ctx: TaskContext) -> List[Dict[str, str]]:
