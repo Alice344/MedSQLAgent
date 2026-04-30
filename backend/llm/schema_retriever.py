@@ -20,11 +20,11 @@ def _tokenize(text: str) -> List[str]:
 
 def _expand_tables_by_fk(
     query: str,
-    selected_names: Set[str],
+    selected_names: List[str],
     all_tables: List[Dict[str, Any]],
     foreign_keys: List[Dict[str, Any]],
     depth: int,
-) -> Set[str]:
+) -> List[str]:
     if depth <= 0 or not selected_names:
         return selected_names
 
@@ -35,7 +35,8 @@ def _expand_tables_by_fk(
         degree[fk["to_table"]] += 1
 
     query_tokens = Counter(_tokenize(query))
-    expanded = set(selected_names)
+    expanded = list(selected_names)
+    expanded_set = set(selected_names)
     frontier = set(selected_names)
 
     for _ in range(depth):
@@ -52,7 +53,7 @@ def _expand_tables_by_fk(
 
         ranked_neighbors = []
         for candidate, link_count in candidate_links.items():
-            if candidate in expanded or candidate not in table_by_name:
+            if candidate in expanded_set or candidate not in table_by_name:
                 continue
             table = table_by_name[candidate]
             text_tokens = Counter(_tokenize(f"{table['name']} {table.get('description') or ''}"))
@@ -62,10 +63,12 @@ def _expand_tables_by_fk(
             ranked_neighbors.append((score, candidate))
 
         ranked_neighbors.sort(reverse=True)
-        frontier = {candidate for _, candidate in ranked_neighbors[:MAX_NEIGHBOR_TABLES]} - expanded
+        frontier = {candidate for _, candidate in ranked_neighbors[:MAX_NEIGHBOR_TABLES]} - expanded_set
         if not frontier:
             break
-        expanded.update(frontier)
+        ordered_frontier = [candidate for _, candidate in ranked_neighbors if candidate in frontier]
+        expanded.extend(ordered_frontier)
+        expanded_set.update(frontier)
     return expanded
 
 
@@ -89,17 +92,23 @@ def retrieve_relevant_schema(
     chunks = retrieve_relevant_doc_chunks(query, top_k=top_k)
     logger.info("Retrieved %d relevant markdown chunks", len(chunks))
 
-    selected_table_names: Set[str] = set()
+    selected_table_names: List[str] = []
+    seen_selected: Set[str] = set()
     for chunk in chunks:
         table_short_name = chunk["table_name"]
         for table in all_tables:
             if table["name"] == table_short_name or table["full_name"].endswith(f".{table_short_name}"):
-                selected_table_names.add(table["full_name"])
+                full_name = table["full_name"]
+                if full_name not in seen_selected:
+                    selected_table_names.append(full_name)
+                    seen_selected.add(full_name)
                 break
 
     if not selected_table_names:
         logger.warning("No table docs matched query; falling back to first %d schema tables", top_k)
-        selected_table_names = {t["full_name"] for t in all_tables[:top_k]}
+        selected_table_names = [t["full_name"] for t in all_tables[:top_k]]
+
+    selected_table_names = selected_table_names[:top_k]
 
     expanded_table_names = _expand_tables_by_fk(
         query,
@@ -108,17 +117,17 @@ def retrieve_relevant_schema(
         all_fks,
         fk_neighbor_depth,
     )
-    selected = {name: table_by_name[name] for name in expanded_table_names if name in table_by_name}
-    selected_set = set(selected)
+    selected = [table_by_name[name] for name in expanded_table_names if name in table_by_name]
+    selected_set = {table["full_name"] for table in selected}
     relevant_fks = [
         fk for fk in all_fks
         if fk["from_table"] in selected_set and fk["to_table"] in selected_set
     ]
 
     return {
-        "tables": list(selected.values()),
+        "tables": selected,
         "foreign_keys": relevant_fks,
-        "selected_tables": sorted(selected_table_names),
-        "expanded_tables": sorted(selected_set),
+        "selected_tables": selected_table_names,
+        "expanded_tables": expanded_table_names,
         "selected_chunks": chunks,
     }
