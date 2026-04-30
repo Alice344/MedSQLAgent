@@ -53,6 +53,8 @@ Thumbs.db
 # Schema storage
 backend/schemas/
 *.json
+backend/wholegraph.json
+docs/caboodle/
 
 # Frontend exceptions – allow Next.js config/package files
 !frontend/package.json
@@ -69,6 +71,6 @@ pci_classified_output.csv
 # Database
 *.db
 *.sqlite
-
+backend/data/conversations.db
 
 

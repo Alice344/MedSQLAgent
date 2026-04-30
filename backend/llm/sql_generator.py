@@ -2,7 +2,7 @@
 LLM-based SQL query generator
 """
 import re
-from typing import Optional
+from typing import Dict, List, Optional
 from llm.client import get_llm_client, get_model_name
 import logging
 
@@ -20,6 +20,7 @@ class SQLGenerator:
         natural_language_query: str,
         schema_description: str,
         model: Optional[str] = None,
+        similar_examples: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """Generate SQL query from natural language"""
         
@@ -37,13 +38,24 @@ Rules:
 
 Return ONLY the SQL query, nothing else."""
 
-        user_prompt = f"""Database Schema (use ONLY these exact table and column names):
+        prompt_parts = []
+        if similar_examples:
+            prompt_parts.append("Similar historical NL-to-SQL examples:")
+            for idx, example in enumerate(similar_examples, start=1):
+                prompt_parts.append(f"Example {idx} NL:\n{example['user_query']}")
+                prompt_parts.append(f"Example {idx} SQL:\n{example['generated_sql']}")
+            prompt_parts.append("")
+
+        prompt_parts.append(
+            f"""Database Schema (use ONLY these exact table and column names):
 {schema_description}
 
 User Request:
 {natural_language_query}
 
 Generate the SQL query using only the tables and columns listed above:"""
+        )
+        user_prompt = "\n".join(prompt_parts)
 
         model = model or get_model_name()
 
@@ -107,6 +119,4 @@ Generate the SQL query using only the tables and columns listed above:"""
         except Exception as e:
             logger.error(f"Error explaining query: {e}")
             return "Unable to generate explanation"
-
-
 

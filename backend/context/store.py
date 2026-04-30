@@ -14,14 +14,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import time
+from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "conversations.db"
+TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
 
 
 class ConversationStore:
@@ -244,6 +248,76 @@ class ConversationStore:
                 (connection_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def find_similar_query_examples(
+        self,
+        user_query: str,
+        limit: int = 3,
+        candidate_limit: int = 200,
+        connection_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return the most similar historical NL/SQL pairs."""
+
+        def tokenize(text: str) -> Counter[str]:
+            return Counter(t.lower() for t in TOKEN_RE.findall(text or ""))
+
+        def similarity_score(left: str, right: str) -> float:
+            left_tokens = tokenize(left)
+            right_tokens = tokenize(right)
+            overlap = sum((left_tokens & right_tokens).values())
+            total = sum((left_tokens | right_tokens).values()) or 1
+            jaccard = overlap / total
+            sequence = SequenceMatcher(None, left.lower(), right.lower()).ratio()
+            return (0.7 * jaccard) + (0.3 * sequence)
+
+        with self._conn() as conn:
+            if connection_id:
+                rows = conn.execute(
+                    """
+                    SELECT connection_id, user_query, generated_sql, created_at
+                    FROM query_history
+                    WHERE generated_sql IS NOT NULL
+                      AND TRIM(generated_sql) <> ''
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (candidate_limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT connection_id, user_query, generated_sql, created_at
+                    FROM query_history
+                    WHERE generated_sql IS NOT NULL
+                      AND TRIM(generated_sql) <> ''
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (candidate_limit,),
+                ).fetchall()
+
+        scored: List[Dict[str, Any]] = []
+        for row in rows:
+            score = similarity_score(user_query, row["user_query"])
+            if connection_id and row["connection_id"] == connection_id:
+                score += 0.05
+            scored.append(
+                {
+                    "connection_id": row["connection_id"],
+                    "user_query": row["user_query"],
+                    "generated_sql": row["generated_sql"],
+                    "created_at": row["created_at"],
+                    "score": score,
+                }
+            )
+
+        ranked = sorted(
+            scored,
+            key=lambda item: (item["score"], item["created_at"]),
+            reverse=True,
+        )
+        non_zero = [item for item in ranked if item["score"] > 0]
+        return (non_zero or ranked)[:limit]
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 

@@ -28,6 +28,7 @@ from database.schema_storage import SchemaStorage
 from database.wholegraph_loader import load_wholegraph_schema
 from llm.sql_generator import SQLGenerator
 from llm.schema_retriever import retrieve_relevant_schema
+from table_docs.table_doc_updater import update_table_docs_for_query
 
 # Multi-agent system
 from agents.orchestrator import Orchestrator
@@ -419,7 +420,7 @@ async def execute_query(request: QueryRequest):
             schema,
             request.natural_language_query,
             top_k=5,
-            fk_neighbor_depth=0,
+            fk_neighbor_depth=1,
         )
         logger.info(
             "RAG selected %d/%d tables for query",
@@ -430,16 +431,52 @@ async def execute_query(request: QueryRequest):
         # Format filtered schema for LLM
         formatted_schema = schema_storage.format_schema_for_llm(relevant_schema)
 
+        similar_examples = conversation_store.find_similar_query_examples(
+            request.natural_language_query,
+            limit=3,
+            connection_id=request.connection_id,
+        )
+        logger.info("Retrieved %d similar NL/SQL examples", len(similar_examples))
+
         # Generate SQL
         sql_generator = SQLGenerator()
         sql_query = sql_generator.generate_sql(
             request.natural_language_query,
-            formatted_schema
+            formatted_schema,
+            similar_examples=similar_examples,
         )
 
         # Execute query
         results = db_conn.execute_query(sql_query)
         results = sanitize_query_rows(results)
+
+        conversation_store.add_query_history(
+            connection_id=request.connection_id,
+            user_query=request.natural_language_query,
+            generated_sql=sql_query,
+            row_count=len(results) if isinstance(results, list) else 0,
+            status="completed",
+            metadata={
+                "selected_tables": relevant_schema.get("selected_tables", []),
+                "expanded_tables": relevant_schema.get("expanded_tables", []),
+                "selected_chunks": relevant_schema.get("selected_chunks", []),
+            },
+        )
+
+        try:
+            touched_docs = update_table_docs_for_query(
+                schema=schema,
+                sql_query=sql_query,
+                natural_language_query=request.natural_language_query,
+            )
+            if touched_docs:
+                logger.info(
+                    "Updated %d table docs after query execution: %s",
+                    len(touched_docs),
+                    [str(path.name) for path in touched_docs],
+                )
+        except Exception as doc_error:
+            logger.warning("Failed to update table docs after query execution: %s", doc_error)
 
         # Generate explanation
         explanation = sql_generator.explain_query(sql_query)
@@ -711,4 +748,3 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
