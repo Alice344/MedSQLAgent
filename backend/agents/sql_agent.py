@@ -21,6 +21,7 @@ class SQLGeneratorAgent(BaseAgent):
     def run(self, ctx: TaskContext, **kwargs: Any) -> AgentResult:
         conversation_context: str = kwargs.get("conversation_context", "")
         previous_sql: Optional[str] = kwargs.get("previous_sql", None)
+        similar_examples: List[Dict[str, str]] = kwargs.get("similar_examples", [])
 
         system_prompt = (
             "You are an expert SQL developer specialising in Microsoft SQL Server (T-SQL).\n"
@@ -42,6 +43,11 @@ class SQLGeneratorAgent(BaseAgent):
             parts.append(f"[Prior conversation]\n{conversation_context}\n")
         if previous_sql:
             parts.append(f"[Previous SQL query]\n{previous_sql}\n")
+        if similar_examples:
+            parts.append("[Similar historical NL-to-SQL examples]")
+            for idx, example in enumerate(similar_examples, start=1):
+                parts.append(f"Example {idx} NL:\n{example.get('user_query', '')}")
+                parts.append(f"Example {idx} SQL:\n{example.get('generated_sql', '')}\n")
         parts.append(
             f"Database Schema (use ONLY these table/column names):\n{ctx.formatted_schema}\n"
         )
