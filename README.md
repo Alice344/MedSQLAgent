@@ -116,7 +116,7 @@ OPENAI_API_KEY=your_key_here
 Run the backend:
 
 ```bash
-python run_port_8001.py
+python run.py
 ```
 
 Backend default URL:
