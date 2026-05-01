@@ -633,7 +633,9 @@ def agent_confirm(request: AgentConfirmRequest):
             modified_sql=request.modified_sql,
         )
         if result.get("status") == "error":
-            raise HTTPException(status_code=404, detail=result["error"])
+            detail = result["error"]
+            status_code = 404 if "not found" in detail.lower() else 400
+            raise HTTPException(status_code=status_code, detail=detail)
         return result
     except HTTPException:
         raise
@@ -650,7 +652,9 @@ def agent_reject(request: AgentRejectRequest):
         reason=request.reason,
     )
     if result.get("status") == "error":
-        raise HTTPException(status_code=404, detail=result["error"])
+        detail = result["error"]
+        status_code = 404 if "not found" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail)
     return result
 
 
