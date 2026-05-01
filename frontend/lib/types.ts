@@ -92,4 +92,5 @@ export interface PendingTask {
   task_id: string;
   generated_sql: string;
   confirmation_message?: string;
+  user_query?: string;
 }
