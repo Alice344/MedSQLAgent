@@ -103,6 +103,7 @@ export default function ChatPage() {
           task_id: data.task_id!,
           generated_sql: data.generated_sql!,
           confirmation_message: data.confirmation_message,
+          user_query: text,
         });
         addMessage({ role: 'assistant', content: 'I\'ve generated SQL for your request. Please review before execution.' });
       } else if (data.status === 'completed') {
@@ -154,9 +155,16 @@ export default function ChatPage() {
     if (!pendingTask) return;
     setConfirmLoading(true);
     try {
-      const data = await agentConfirm(pendingTask.task_id, connectionId!, modifiedSql);
-      setPendingTask(null);
+      const currentSql = (modifiedSql ?? pendingTask.generated_sql)?.trim();
+      const data = await agentConfirm(
+        pendingTask.task_id,
+        connectionId!,
+        modifiedSql,
+        currentSql,
+        pendingTask.user_query,
+      );
       if (data.status === 'completed') {
+        setPendingTask(null);
         if (data.generated_sql) addMessage({ role: 'sql', content: modifiedSql ?? data.generated_sql });
         if (data.explanation) addMessage({ role: 'assistant', content: data.explanation });
         if (data.results != null) {

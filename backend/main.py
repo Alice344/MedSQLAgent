@@ -577,6 +577,8 @@ class AgentConfirmRequest(BaseModel):
     task_id: str
     connection_id: str
     modified_sql: Optional[str] = None
+    current_sql: Optional[str] = None
+    user_query: Optional[str] = None
 
 
 class AgentRejectRequest(BaseModel):
@@ -629,8 +631,11 @@ def agent_confirm(request: AgentConfirmRequest):
     try:
         result = orchestrator.confirm_task(
             task_id=request.task_id,
+            connection_id=request.connection_id,
             db_connection=db_conn,
             modified_sql=request.modified_sql,
+            current_sql=request.current_sql,
+            user_query=request.user_query,
         )
         if result.get("status") == "error":
             detail = result["error"]

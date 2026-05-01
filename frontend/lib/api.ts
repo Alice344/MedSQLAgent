@@ -36,11 +36,15 @@ export async function agentConfirm(
   task_id: string,
   connection_id: string,
   modified_sql?: string,
+  current_sql?: string,
+  user_query?: string,
 ): Promise<AgentChatResponse> {
   const r = await http.post<AgentChatResponse>('/api/agent/confirm', {
     task_id,
     connection_id,
     ...(modified_sql ? { modified_sql } : {}),
+    ...(current_sql ? { current_sql } : {}),
+    ...(user_query ? { user_query } : {}),
   });
   return r.data;
 }

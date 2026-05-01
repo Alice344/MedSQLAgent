@@ -170,10 +170,28 @@ class Orchestrator:
     def confirm_task(
         self,
         task_id: str,
+        connection_id: str,
         db_connection: DatabaseConnection,
         modified_sql: Optional[str] = None,
+        current_sql: Optional[str] = None,
+        user_query: Optional[str] = None,
     ) -> Dict[str, Any]:
         ctx = self._get_pending_task(task_id)
+        if not ctx:
+            fallback_sql = (modified_sql or current_sql or "").strip()
+            if fallback_sql:
+                ctx = TaskContext(
+                    task_id=task_id,
+                    connection_id=connection_id,
+                    user_query=(user_query or "").strip(),
+                    status=TaskStatus.AWAITING_CONFIRMATION,
+                )
+                ctx.generated_sql = fallback_sql
+                ctx.add_message(
+                    "agent",
+                    "Recovered confirmation task from request payload.",
+                    agent=AgentRole.ORCHESTRATOR.value,
+                )
         if not ctx:
             return {"status": "error", "error": f"Task '{task_id}' not found."}
 
