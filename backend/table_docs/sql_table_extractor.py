@@ -7,9 +7,16 @@ from typing import Dict, Iterable, List
 
 TABLE_PATTERN = re.compile(
     r"\b(?:FROM|JOIN|INTO|UPDATE|MERGE\s+INTO|DELETE\s+FROM)\s+"
-    r"([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)",
+    r"((?:\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*\.\s*(?:\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*))?)",
     re.IGNORECASE,
 )
+
+
+def _normalize_table_token(token: str) -> str:
+    cleaned = re.sub(r"\[([^\]]+)\]", r"\1", token or "")
+    cleaned = re.sub(r"\s+", "", cleaned)
+    return cleaned.strip().lower()
 
 
 def extract_schema_tables(sql: str, schema_tables: Iterable[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -22,10 +29,11 @@ def extract_schema_tables(sql: str, schema_tables: Iterable[Dict[str, object]]) 
     matched: List[Dict[str, object]] = []
 
     for raw_name in TABLE_PATTERN.findall(sql or ""):
-        if raw_name.startswith("#"):
+        normalized_name = _normalize_table_token(raw_name)
+        if normalized_name.startswith("#"):
             continue
 
-        key = raw_name.lower()
+        key = normalized_name
         table = by_full_name.get(key)
         if not table:
             short_name = key.split(".", 1)[-1]

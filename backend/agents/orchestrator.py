@@ -84,6 +84,12 @@ class Orchestrator:
             limit=3,
             connection_id=connection_id,
         )
+        logger.info(
+            "Task %s retrieved %s similar examples (top_score=%s)",
+            ctx.task_id,
+            len(similar_examples),
+            round(float(similar_examples[0].get("score", 0.0)), 3) if similar_examples else None,
+        )
 
         intent_result = self.intent_agent.run(
             ctx,
@@ -323,10 +329,15 @@ class Orchestrator:
         schema = self.schema_storage.load_schema(ctx.connection_id)
         if schema and ctx.generated_sql:
             try:
-                update_table_docs_for_query(
+                touched_docs = update_table_docs_for_query(
                     schema=schema,
                     sql_query=ctx.generated_sql,
                     natural_language_query=ctx.user_query,
+                )
+                logger.info(
+                    "Task %s updated %s table docs",
+                    ctx.task_id,
+                    len(touched_docs),
                 )
             except Exception as exc:
                 logger.warning("Failed to update table docs for task %s: %s", ctx.task_id, exc)

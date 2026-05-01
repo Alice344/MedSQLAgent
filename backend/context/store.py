@@ -249,6 +249,15 @@ class ConversationStore:
                     json.dumps(metadata or {}),
                 ),
             )
+            logger.info(
+                "Stored query_history row id=%s task_id=%s connection_id=%s status=%s row_count=%s query=%r",
+                cur.lastrowid,
+                task_id,
+                connection_id,
+                status,
+                row_count,
+                user_query[:160],
+            )
             return cur.lastrowid  # type: ignore[return-value]
 
     def get_query_history(
@@ -274,6 +283,9 @@ class ConversationStore:
         def tokenize(text: str) -> Counter[str]:
             return Counter(t.lower() for t in TOKEN_RE.findall(text or ""))
 
+        def normalize(text: str) -> str:
+            return " ".join(TOKEN_RE.findall((text or "").lower()))
+
         def similarity_score(left: str, right: str) -> float:
             left_tokens = tokenize(left)
             right_tokens = tokenize(right)
@@ -281,7 +293,16 @@ class ConversationStore:
             total = sum((left_tokens | right_tokens).values()) or 1
             jaccard = overlap / total
             sequence = SequenceMatcher(None, left.lower(), right.lower()).ratio()
-            return (0.7 * jaccard) + (0.3 * sequence)
+            left_norm = normalize(left)
+            right_norm = normalize(right)
+            if left_norm and left_norm == right_norm:
+                return 1.0
+
+            containment_boost = 0.0
+            if left_norm and right_norm and (left_norm in right_norm or right_norm in left_norm):
+                containment_boost = 0.12
+
+            return min(1.0, (0.65 * jaccard) + (0.25 * sequence) + containment_boost)
 
         with self._conn() as conn:
             if connection_id:
@@ -321,6 +342,9 @@ class ConversationStore:
                     "generated_sql": row["generated_sql"],
                     "created_at": row["created_at"],
                     "score": score,
+                    "match_strength": (
+                        "high" if score >= 0.72 else "medium" if score >= 0.45 else "low"
+                    ),
                 }
             )
 
@@ -330,7 +354,21 @@ class ConversationStore:
             reverse=True,
         )
         non_zero = [item for item in ranked if item["score"] > 0]
-        return (non_zero or ranked)[:limit]
+        selected = (non_zero or ranked)[:limit]
+        logger.info(
+            "Retrieved %s similar examples for query=%r top_scores=%s",
+            len(selected),
+            user_query[:160],
+            [
+                {
+                    "score": round(item["score"], 3),
+                    "strength": item["match_strength"],
+                    "query": item["user_query"][:100],
+                }
+                for item in selected
+            ],
+        )
+        return selected
 
     # ── Task State ───────────────────────────────────────────────────────
 
