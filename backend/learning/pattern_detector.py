@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from context.store import normalize_text, score_query_similarity
+from context.similarity import normalize_text, score_query_similarity
 from skills.policy import (
     MAX_EXAMPLE_QUERIES,
     MAX_EXAMPLE_SQLS,
