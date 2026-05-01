@@ -6,6 +6,7 @@ Tables
 conversations  – one row per connection_id session
 messages       – individual turns within a conversation
 query_history  – every SQL query executed (with metadata)
+task_state     – persisted pending/completed agent task snapshots
 
 The DB file lives at ``backend/data/conversations.db`` by default.
 """
@@ -90,6 +91,18 @@ class ConversationStore:
 
                 CREATE INDEX IF NOT EXISTS idx_qh_conn
                     ON query_history(connection_id);
+
+                CREATE TABLE IF NOT EXISTS task_state (
+                    task_id         TEXT PRIMARY KEY,
+                    connection_id   TEXT NOT NULL,
+                    conversation_id TEXT,
+                    status          TEXT NOT NULL,
+                    payload         TEXT NOT NULL,
+                    updated_at      REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_task_state_conn
+                    ON task_state(connection_id);
                 """
             )
         logger.info("ConversationStore initialised at %s", self.db_path)
@@ -319,6 +332,68 @@ class ConversationStore:
         non_zero = [item for item in ranked if item["score"] > 0]
         return (non_zero or ranked)[:limit]
 
+    # ── Task State ───────────────────────────────────────────────────────
+
+    def save_task_state(
+        self,
+        task_id: str,
+        connection_id: str,
+        status: str,
+        payload: Dict[str, Any],
+        conversation_id: Optional[str] = None,
+    ) -> None:
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO task_state (task_id, connection_id, conversation_id, status, payload, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    connection_id=excluded.connection_id,
+                    conversation_id=excluded.conversation_id,
+                    status=excluded.status,
+                    payload=excluded.payload,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    task_id,
+                    connection_id,
+                    conversation_id,
+                    status,
+                    json.dumps(payload),
+                    now,
+                ),
+            )
+
+    def get_task_state(self, task_id: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT task_id, connection_id, conversation_id, status, payload, updated_at
+                FROM task_state
+                WHERE task_id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "task_id": row["task_id"],
+                "connection_id": row["connection_id"],
+                "conversation_id": row["conversation_id"],
+                "status": row["status"],
+                "payload": json.loads(row["payload"]),
+                "updated_at": row["updated_at"],
+            }
+
+    def delete_task_state(self, task_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM task_state WHERE task_id = ?", (task_id,))
+
+    def clear_task_state_for_connection(self, connection_id: str) -> None:
+        with self._conn() as conn:
+            conn.execute("DELETE FROM task_state WHERE connection_id = ?", (connection_id,))
+
     # ── Cleanup ──────────────────────────────────────────────────────────
 
     def clear_conversation(self, connection_id: str) -> None:
@@ -341,4 +416,5 @@ class ConversationStore:
                     f"DELETE FROM conversations WHERE id IN ({placeholders})",
                     conv_ids,
                 )
+            conn.execute("DELETE FROM task_state WHERE connection_id = ?", (connection_id,))
         logger.info("Cleared conversations for connection %s", connection_id)

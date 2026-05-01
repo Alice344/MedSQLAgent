@@ -24,7 +24,7 @@ from table_docs.table_doc_updater import update_table_docs_for_query
 from context.manager import ContextWindowManager
 from context.store import ConversationStore
 
-from .base import AgentRole, AgentResult, IntentType, TaskContext, TaskStatus
+from .base import AgentMessage, AgentRole, AgentResult, IntentType, TaskContext, TaskStatus
 from .execution_agent import ExecutionAgent
 from .explanation_agent import ExplanationAgent
 from .intent_agent import IntentAgent
@@ -155,6 +155,7 @@ class Orchestrator:
         ctx.needs_confirmation = True
         ctx.confirmation_message = self._build_confirmation_message(validation_result)
         self._pending_tasks[ctx.task_id] = ctx
+        self._save_task_snapshot(ctx, conversation_id)
 
         review_msg = "I've generated SQL for your request. Please review or modify it before execution."
         self._persist_assistant_message(connection_id, conversation_id, review_msg, ctx)
@@ -172,7 +173,7 @@ class Orchestrator:
         db_connection: DatabaseConnection,
         modified_sql: Optional[str] = None,
     ) -> Dict[str, Any]:
-        ctx = self._pending_tasks.get(task_id)
+        ctx = self._get_pending_task(task_id)
         if not ctx:
             return {"status": "error", "error": f"Task '{task_id}' not found."}
 
@@ -185,10 +186,15 @@ class Orchestrator:
             )
             validation_result = self.validation_agent.run(ctx)
             if not validation_result.success:
+                self._save_task_snapshot(
+                    ctx,
+                    self.conversation_store.get_or_create_conversation(ctx.connection_id),
+                )
                 return {"status": "error", "error": validation_result.error or "Modified SQL validation failed."}
 
         ctx.status = TaskStatus.CONFIRMED
         conversation_id = self.conversation_store.get_or_create_conversation(ctx.connection_id)
+        self._save_task_snapshot(ctx, conversation_id)
 
         result = self._execute_and_finalize(
             ctx=ctx,
@@ -199,7 +205,7 @@ class Orchestrator:
         return result
 
     def reject_task(self, task_id: str, reason: str = "") -> Dict[str, Any]:
-        ctx = self._pending_tasks.pop(task_id, None)
+        ctx = self._get_pending_task(task_id)
         if not ctx:
             return {"status": "error", "error": f"Task '{task_id}' not found."}
 
@@ -209,6 +215,8 @@ class Orchestrator:
 
         conversation_id = self.conversation_store.get_or_create_conversation(ctx.connection_id)
         self._persist_assistant_message(ctx.connection_id, conversation_id, note, ctx)
+        self.conversation_store.delete_task_state(task_id)
+        self._pending_tasks.pop(task_id, None)
         return {
             "status": "completed",
             "task_id": ctx.task_id,
@@ -217,7 +225,7 @@ class Orchestrator:
         }
 
     def visualize_task(self, task_id: str) -> Dict[str, Any]:
-        ctx = self._completed_tasks.get(task_id)
+        ctx = self._get_completed_task(task_id)
         if not ctx:
             return {"status": "error", "error": f"Task '{task_id}' not found or has no results."}
 
@@ -269,10 +277,12 @@ class Orchestrator:
     ) -> Dict[str, Any]:
         execution_result = self.execution_agent.run(ctx, db_connection=db_connection)
         if not execution_result.success:
+            self._save_task_snapshot(ctx, conversation_id)
             return self._error_response(ctx, execution_result.error or "Execution failed.")
 
         explain_result = self.explanation_agent.run(ctx)
         if not explain_result.success:
+            self._save_task_snapshot(ctx, conversation_id)
             return self._error_response(ctx, explain_result.error or "Explanation failed.")
 
         ctx.status = TaskStatus.COMPLETED
@@ -305,6 +315,7 @@ class Orchestrator:
 
         assistant_text = ctx.explanation or "Query completed successfully."
         self._persist_assistant_message(ctx.connection_id, conversation_id, assistant_text, ctx)
+        self._save_task_snapshot(ctx, conversation_id)
 
         return self._completed_response(
             ctx,
@@ -351,6 +362,41 @@ class Orchestrator:
             metadata={"task_id": ctx.task_id},
         )
 
+    def _save_task_snapshot(self, ctx: TaskContext, conversation_id: str) -> None:
+        self.conversation_store.save_task_state(
+            task_id=ctx.task_id,
+            connection_id=ctx.connection_id,
+            conversation_id=conversation_id,
+            status=ctx.status.value,
+            payload=self._serialize_task_context(ctx),
+        )
+
+    def _load_task_snapshot(self, task_id: str) -> Optional[TaskContext]:
+        record = self.conversation_store.get_task_state(task_id)
+        if not record:
+            return None
+        return self._deserialize_task_context(record["payload"])
+
+    def _get_pending_task(self, task_id: str) -> Optional[TaskContext]:
+        ctx = self._pending_tasks.get(task_id)
+        if ctx:
+            return ctx
+        ctx = self._load_task_snapshot(task_id)
+        if ctx and ctx.status == TaskStatus.AWAITING_CONFIRMATION:
+            self._pending_tasks[task_id] = ctx
+            return ctx
+        return None
+
+    def _get_completed_task(self, task_id: str) -> Optional[TaskContext]:
+        ctx = self._completed_tasks.get(task_id)
+        if ctx:
+            return ctx
+        ctx = self._load_task_snapshot(task_id)
+        if ctx and ctx.status == TaskStatus.COMPLETED:
+            self._completed_tasks[task_id] = ctx
+            return ctx
+        return None
+
     def _get_context_manager(self, connection_id: str) -> ContextWindowManager:
         manager = self._context_managers.get(connection_id)
         if manager is None:
@@ -372,6 +418,85 @@ class Orchestrator:
         if extra:
             return f"{base}\n\n{extra}"
         return base
+
+    @staticmethod
+    def _serialize_task_context(ctx: TaskContext) -> Dict[str, Any]:
+        return {
+            "task_id": ctx.task_id,
+            "connection_id": ctx.connection_id,
+            "user_query": ctx.user_query,
+            "refined_query": ctx.refined_query,
+            "intent": ctx.intent.value if ctx.intent else None,
+            "selected_tables": ctx.selected_tables,
+            "formatted_schema": ctx.formatted_schema,
+            "generated_sql": ctx.generated_sql,
+            "validation_result": ctx.validation_result,
+            "execution_result": ctx.execution_result,
+            "explanation": ctx.explanation,
+            "visualization_config": ctx.visualization_config,
+            "status": ctx.status.value,
+            "error": ctx.error,
+            "needs_confirmation": ctx.needs_confirmation,
+            "confirmation_message": ctx.confirmation_message,
+            "messages": [
+                {
+                    "role": msg.role,
+                    "content": msg.content,
+                    "agent": msg.agent,
+                    "timestamp": msg.timestamp,
+                    "metadata": msg.metadata,
+                    "token_count": msg.token_count,
+                }
+                for msg in ctx.messages
+            ],
+            "created_at": ctx.created_at,
+            "updated_at": ctx.updated_at,
+        }
+
+    @staticmethod
+    def _deserialize_task_context(payload: Dict[str, Any]) -> TaskContext:
+        ctx = TaskContext(
+            task_id=payload.get("task_id", ""),
+            connection_id=payload.get("connection_id", ""),
+            user_query=payload.get("user_query", ""),
+            refined_query=payload.get("refined_query", ""),
+            created_at=payload.get("created_at", 0.0),
+            updated_at=payload.get("updated_at", 0.0),
+        )
+        intent = payload.get("intent")
+        if intent:
+            try:
+                ctx.intent = IntentType(intent)
+            except ValueError:
+                ctx.intent = None
+        status = payload.get("status")
+        if status:
+            try:
+                ctx.status = TaskStatus(status)
+            except ValueError:
+                ctx.status = TaskStatus.PENDING
+        ctx.selected_tables = payload.get("selected_tables", [])
+        ctx.formatted_schema = payload.get("formatted_schema", "")
+        ctx.generated_sql = payload.get("generated_sql")
+        ctx.validation_result = payload.get("validation_result")
+        ctx.execution_result = payload.get("execution_result")
+        ctx.explanation = payload.get("explanation")
+        ctx.visualization_config = payload.get("visualization_config")
+        ctx.error = payload.get("error")
+        ctx.needs_confirmation = bool(payload.get("needs_confirmation", False))
+        ctx.confirmation_message = payload.get("confirmation_message")
+        ctx.messages = [
+            AgentMessage(
+                role=msg.get("role", "agent"),
+                content=msg.get("content", ""),
+                agent=msg.get("agent"),
+                timestamp=msg.get("timestamp", 0.0),
+                metadata=msg.get("metadata", {}),
+                token_count=msg.get("token_count", 0),
+            )
+            for msg in payload.get("messages", [])
+        ]
+        return ctx
 
     @staticmethod
     def _agent_trace(ctx: TaskContext) -> List[Dict[str, str]]:
