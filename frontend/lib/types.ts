@@ -59,6 +59,37 @@ export interface QueryHistoryItem {
   created_at?: string;
 }
 
+export interface SkillCandidate {
+  id: number;
+  title: string;
+  summary: string;
+  trigger_query: string;
+  representative_sql?: string;
+  confidence: number;
+  status: 'pending' | 'approved' | 'rejected' | string;
+  metadata?: {
+    selected_tables?: string[];
+    example_queries?: string[];
+    example_sqls?: string[];
+    instructions?: string;
+    avg_similarity?: number;
+    top_similarity?: number;
+    review_notes?: string;
+  };
+}
+
+export interface PublishedSkill {
+  id: number;
+  title: string;
+  summary: string;
+  instructions: string;
+  metadata?: {
+    selected_tables?: string[];
+    example_queries?: string[];
+    review_notes?: string;
+  };
+}
+
 export interface TableSummary {
   full_name: string;
   description?: string;

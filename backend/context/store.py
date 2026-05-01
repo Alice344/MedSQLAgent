@@ -6,6 +6,11 @@ Tables
 conversations  – one row per connection_id session
 messages       – individual turns within a conversation
 query_history  – every SQL query executed (with metadata)
+query_attempts – generated SQL drafts and their lifecycle
+query_corrections – user-edited SQL corrections before execution
+skill_candidates – auto-detected reusable SQL patterns awaiting approval
+published_skills – manually approved reusable skills
+skill_usage_history – runtime usage/outcome tracking for published skills
 task_state     – persisted pending/completed agent task snapshots
 
 The DB file lives at ``backend/data/conversations.db`` by default.
@@ -27,6 +32,58 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "conversations.db"
 TOKEN_RE = re.compile(r"[a-zA-Z0-9_]+")
+TOKEN_ALIASES = {
+    "admission": "admit",
+    "admissions": "admit",
+    "admitted": "admit",
+    "inpatient": "admit",
+    "hospitalization": "admit",
+    "hospitalizations": "admit",
+    "hospitalized": "admit",
+    "patients": "patient",
+    "queries": "query",
+}
+
+
+def canonicalize_token(token: str) -> str:
+    value = (token or "").lower()
+    if value in TOKEN_ALIASES:
+        return TOKEN_ALIASES[value]
+    for suffix in ("ations", "ation", "ments", "ment", "ingly", "edly", "ingly", "ing", "ers", "ies", "ied", "ions", "ion", "ed", "es", "s"):
+        if len(value) > len(suffix) + 3 and value.endswith(suffix):
+            if suffix in {"ies", "ied"}:
+                value = value[: -len(suffix)] + "y"
+            else:
+                value = value[: -len(suffix)]
+            break
+    return TOKEN_ALIASES.get(value, value)
+
+
+def tokenize_text(text: str) -> Counter[str]:
+    return Counter(canonicalize_token(t) for t in TOKEN_RE.findall(text or ""))
+
+
+def normalize_text(text: str) -> str:
+    return " ".join(canonicalize_token(t) for t in TOKEN_RE.findall(text or ""))
+
+
+def score_query_similarity(left: str, right: str) -> float:
+    left_tokens = tokenize_text(left)
+    right_tokens = tokenize_text(right)
+    overlap = sum((left_tokens & right_tokens).values())
+    total = sum((left_tokens | right_tokens).values()) or 1
+    jaccard = overlap / total
+    sequence = SequenceMatcher(None, left.lower(), right.lower()).ratio()
+    left_norm = normalize_text(left)
+    right_norm = normalize_text(right)
+    if left_norm and left_norm == right_norm:
+        return 1.0
+
+    containment_boost = 0.0
+    if left_norm and right_norm and (left_norm in right_norm or right_norm in left_norm):
+        containment_boost = 0.12
+
+    return min(1.0, (0.65 * jaccard) + (0.25 * sequence) + containment_boost)
 
 
 class ConversationStore:
@@ -91,6 +148,88 @@ class ConversationStore:
 
                 CREATE INDEX IF NOT EXISTS idx_qh_conn
                     ON query_history(connection_id);
+
+                CREATE TABLE IF NOT EXISTS query_attempts (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_id   TEXT NOT NULL,
+                    conversation_id TEXT,
+                    task_id         TEXT NOT NULL,
+                    user_query      TEXT NOT NULL,
+                    generated_sql   TEXT,
+                    status          TEXT NOT NULL DEFAULT 'generated',
+                    error           TEXT,
+                    created_at      REAL NOT NULL,
+                    updated_at      REAL NOT NULL,
+                    metadata        TEXT DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_query_attempts_task
+                    ON query_attempts(task_id);
+
+                CREATE TABLE IF NOT EXISTS query_corrections (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_id   TEXT NOT NULL,
+                    conversation_id TEXT,
+                    task_id         TEXT,
+                    user_query      TEXT NOT NULL,
+                    original_sql    TEXT NOT NULL,
+                    corrected_sql   TEXT NOT NULL,
+                    correction_kind TEXT NOT NULL DEFAULT 'manual_edit',
+                    created_at      REAL NOT NULL,
+                    metadata        TEXT DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_query_corrections_task
+                    ON query_corrections(task_id);
+
+                CREATE TABLE IF NOT EXISTS skill_candidates (
+                    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_id     TEXT NOT NULL,
+                    candidate_key     TEXT NOT NULL UNIQUE,
+                    title             TEXT NOT NULL,
+                    summary           TEXT NOT NULL,
+                    trigger_query     TEXT NOT NULL,
+                    representative_sql TEXT,
+                    confidence        REAL NOT NULL DEFAULT 0,
+                    status            TEXT NOT NULL DEFAULT 'pending',
+                    created_at        REAL NOT NULL,
+                    updated_at        REAL NOT NULL,
+                    metadata          TEXT DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_skill_candidates_conn
+                    ON skill_candidates(connection_id, status);
+
+                CREATE TABLE IF NOT EXISTS published_skills (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_id      TEXT NOT NULL,
+                    skill_candidate_id INTEGER,
+                    title              TEXT NOT NULL,
+                    summary            TEXT NOT NULL,
+                    instructions       TEXT NOT NULL,
+                    status             TEXT NOT NULL DEFAULT 'active',
+                    created_at         REAL NOT NULL,
+                    updated_at         REAL NOT NULL,
+                    metadata           TEXT DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_published_skills_conn
+                    ON published_skills(connection_id, status);
+
+                CREATE TABLE IF NOT EXISTS skill_usage_history (
+                    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                    connection_id      TEXT NOT NULL,
+                    task_id            TEXT,
+                    published_skill_id INTEGER NOT NULL,
+                    user_query         TEXT NOT NULL,
+                    match_score        REAL,
+                    outcome            TEXT NOT NULL DEFAULT 'used',
+                    created_at         REAL NOT NULL,
+                    metadata           TEXT DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_skill_usage_skill
+                    ON skill_usage_history(published_skill_id);
 
                 CREATE TABLE IF NOT EXISTS task_state (
                     task_id         TEXT PRIMARY KEY,
@@ -280,30 +419,6 @@ class ConversationStore:
     ) -> List[Dict[str, Any]]:
         """Return the most similar historical NL/SQL pairs."""
 
-        def tokenize(text: str) -> Counter[str]:
-            return Counter(t.lower() for t in TOKEN_RE.findall(text or ""))
-
-        def normalize(text: str) -> str:
-            return " ".join(TOKEN_RE.findall((text or "").lower()))
-
-        def similarity_score(left: str, right: str) -> float:
-            left_tokens = tokenize(left)
-            right_tokens = tokenize(right)
-            overlap = sum((left_tokens & right_tokens).values())
-            total = sum((left_tokens | right_tokens).values()) or 1
-            jaccard = overlap / total
-            sequence = SequenceMatcher(None, left.lower(), right.lower()).ratio()
-            left_norm = normalize(left)
-            right_norm = normalize(right)
-            if left_norm and left_norm == right_norm:
-                return 1.0
-
-            containment_boost = 0.0
-            if left_norm and right_norm and (left_norm in right_norm or right_norm in left_norm):
-                containment_boost = 0.12
-
-            return min(1.0, (0.65 * jaccard) + (0.25 * sequence) + containment_boost)
-
         with self._conn() as conn:
             if connection_id:
                 rows = conn.execute(
@@ -332,7 +447,7 @@ class ConversationStore:
 
         scored: List[Dict[str, Any]] = []
         for row in rows:
-            score = similarity_score(user_query, row["user_query"])
+            score = score_query_similarity(user_query, row["user_query"])
             if connection_id and row["connection_id"] == connection_id:
                 score += 0.05
             scored.append(
@@ -369,6 +484,376 @@ class ConversationStore:
             ],
         )
         return selected
+
+    def get_recent_successful_queries(
+        self, connection_id: str, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, connection_id, conversation_id, task_id, user_query, generated_sql,
+                       row_count, status, error, created_at, metadata
+                FROM query_history
+                WHERE connection_id = ?
+                  AND status = 'completed'
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (connection_id, limit),
+            ).fetchall()
+            parsed: List[Dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                item["metadata"] = json.loads(item.get("metadata") or "{}")
+                parsed.append(item)
+            return parsed
+
+    # ── Query Attempts / Corrections ─────────────────────────────────────
+
+    def add_query_attempt(
+        self,
+        connection_id: str,
+        task_id: str,
+        user_query: str,
+        generated_sql: Optional[str],
+        status: str,
+        conversation_id: Optional[str] = None,
+        error: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        now = time.time()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO query_attempts
+                (connection_id, conversation_id, task_id, user_query, generated_sql, status, error, created_at, updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    connection_id,
+                    conversation_id,
+                    task_id,
+                    user_query,
+                    generated_sql,
+                    status,
+                    error,
+                    now,
+                    now,
+                    json.dumps(metadata or {}),
+                ),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
+
+    def update_query_attempt(
+        self,
+        task_id: str,
+        status: str,
+        generated_sql: Optional[str] = None,
+        error: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM query_attempts WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            existing_meta = json.loads(row["metadata"]) if row and row["metadata"] else {}
+            merged_meta = {**existing_meta, **(metadata or {})}
+            conn.execute(
+                """
+                UPDATE query_attempts
+                SET status = ?,
+                    generated_sql = COALESCE(?, generated_sql),
+                    error = ?,
+                    updated_at = ?,
+                    metadata = ?
+                WHERE id = (
+                    SELECT id FROM query_attempts WHERE task_id = ? ORDER BY id DESC LIMIT 1
+                )
+                """,
+                (
+                    status,
+                    generated_sql,
+                    error,
+                    time.time(),
+                    json.dumps(merged_meta),
+                    task_id,
+                ),
+            )
+
+    def add_query_correction(
+        self,
+        connection_id: str,
+        user_query: str,
+        original_sql: str,
+        corrected_sql: str,
+        correction_kind: str = "manual_edit",
+        conversation_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO query_corrections
+                (connection_id, conversation_id, task_id, user_query, original_sql, corrected_sql, correction_kind, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    connection_id,
+                    conversation_id,
+                    task_id,
+                    user_query,
+                    original_sql,
+                    corrected_sql,
+                    correction_kind,
+                    time.time(),
+                    json.dumps(metadata or {}),
+                ),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
+
+    # ── Skills ───────────────────────────────────────────────────────────
+
+    def upsert_skill_candidate(
+        self,
+        connection_id: str,
+        candidate_key: str,
+        title: str,
+        summary: str,
+        trigger_query: str,
+        representative_sql: Optional[str],
+        confidence: float,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        now = time.time()
+        payload = json.dumps(metadata or {})
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT id, status FROM skill_candidates WHERE candidate_key = ?",
+                (candidate_key,),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE skill_candidates
+                    SET title = ?, summary = ?, trigger_query = ?, representative_sql = ?,
+                        confidence = ?, updated_at = ?, metadata = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        title,
+                        summary,
+                        trigger_query,
+                        representative_sql,
+                        confidence,
+                        now,
+                        payload,
+                        existing["id"],
+                    ),
+                )
+                return int(existing["id"])
+
+            cur = conn.execute(
+                """
+                INSERT INTO skill_candidates
+                (connection_id, candidate_key, title, summary, trigger_query, representative_sql, confidence, status, created_at, updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    connection_id,
+                    candidate_key,
+                    title,
+                    summary,
+                    trigger_query,
+                    representative_sql,
+                    confidence,
+                    now,
+                    now,
+                    payload,
+                ),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
+
+    def list_skill_candidates(
+        self,
+        connection_id: str,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM skill_candidates
+                    WHERE connection_id = ? AND status = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (connection_id, status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM skill_candidates
+                    WHERE connection_id = ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                    """,
+                    (connection_id, limit),
+                ).fetchall()
+            return [self._parse_row_with_metadata(row) for row in rows]
+
+    def get_skill_candidate(self, candidate_id: int) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM skill_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+            return self._parse_row_with_metadata(row) if row else None
+
+    def publish_skill_candidate(
+        self,
+        candidate_id: int,
+        review_notes: str = "",
+        edited_title: Optional[str] = None,
+        edited_instructions: Optional[str] = None,
+    ) -> Optional[int]:
+        candidate = self.get_skill_candidate(candidate_id)
+        if not candidate:
+            return None
+
+        metadata = candidate.get("metadata", {})
+        instructions = edited_instructions or metadata.get("instructions") or candidate["summary"]
+        title = edited_title or candidate["title"]
+        now = time.time()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO published_skills
+                (connection_id, skill_candidate_id, title, summary, instructions, status, created_at, updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                """,
+                (
+                    candidate["connection_id"],
+                    candidate_id,
+                    title,
+                    candidate["summary"],
+                    instructions,
+                    now,
+                    now,
+                    json.dumps(metadata),
+                ),
+            )
+            merged_meta = {**metadata, "review_notes": review_notes}
+            conn.execute(
+                """
+                UPDATE skill_candidates
+                SET status = 'approved', updated_at = ?, metadata = ?
+                WHERE id = ?
+                """,
+                (now, json.dumps(merged_meta), candidate_id),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
+
+    def reject_skill_candidate(self, candidate_id: int, review_notes: str = "") -> None:
+        candidate = self.get_skill_candidate(candidate_id)
+        if not candidate:
+            return
+        metadata = {**candidate.get("metadata", {}), "review_notes": review_notes}
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE skill_candidates
+                SET status = 'rejected', updated_at = ?, metadata = ?
+                WHERE id = ?
+                """,
+                (time.time(), json.dumps(metadata), candidate_id),
+            )
+
+    def list_published_skills(
+        self,
+        connection_id: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM published_skills
+                WHERE connection_id = ? AND status = 'active'
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (connection_id, limit),
+            ).fetchall()
+            return [self._parse_row_with_metadata(row) for row in rows]
+
+    def find_matching_published_skills(
+        self,
+        connection_id: str,
+        user_query: str,
+        selected_tables: Optional[List[str]] = None,
+        limit: int = 2,
+    ) -> List[Dict[str, Any]]:
+        candidates = self.list_published_skills(connection_id, limit=50)
+        selected_set = {item.lower() for item in (selected_tables or [])}
+        scored: List[Dict[str, Any]] = []
+        for skill in candidates:
+            metadata = skill.get("metadata", {})
+            score = score_query_similarity(user_query, skill.get("trigger_query", ""))
+            query_examples = metadata.get("example_queries", [])
+            if query_examples:
+                score = max(score, max(score_query_similarity(user_query, q) for q in query_examples))
+
+            skill_tables = {str(t).lower() for t in metadata.get("selected_tables", [])}
+            if selected_set and skill_tables:
+                overlap = len(selected_set & skill_tables) / max(len(selected_set | skill_tables), 1)
+                score += 0.2 * overlap
+
+            if score < 0.35:
+                continue
+            scored.append(
+                {
+                    **skill,
+                    "match_score": min(score, 1.0),
+                }
+            )
+
+        ranked = sorted(scored, key=lambda item: item["match_score"], reverse=True)
+        return ranked[:limit]
+
+    def add_skill_usage(
+        self,
+        connection_id: str,
+        published_skill_id: int,
+        user_query: str,
+        outcome: str,
+        task_id: Optional[str] = None,
+        match_score: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO skill_usage_history
+                (connection_id, task_id, published_skill_id, user_query, match_score, outcome, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    connection_id,
+                    task_id,
+                    published_skill_id,
+                    user_query,
+                    match_score,
+                    outcome,
+                    time.time(),
+                    json.dumps(metadata or {}),
+                ),
+            )
+            return cur.lastrowid  # type: ignore[return-value]
 
     # ── Task State ───────────────────────────────────────────────────────
 
@@ -456,3 +941,9 @@ class ConversationStore:
                 )
             conn.execute("DELETE FROM task_state WHERE connection_id = ?", (connection_id,))
         logger.info("Cleared conversations for connection %s", connection_id)
+
+    @staticmethod
+    def _parse_row_with_metadata(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        item["metadata"] = json.loads(item.get("metadata") or "{}")
+        return item

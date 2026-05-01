@@ -19,13 +19,18 @@ import {
   agentConfirm,
   agentReject,
   agentVisualize,
+  approveSkillCandidate,
   getQueryHistory,
+  getPublishedSkills,
+  getSkillCandidates,
+  rejectSkillCandidate,
   clearHistory,
   newConversation,
   refreshSchema,
 } from '@/lib/api';
-import type { PendingTask, QueryHistoryItem } from '@/lib/types';
+import type { PendingTask, PublishedSkill, QueryHistoryItem, SkillCandidate } from '@/lib/types';
 import ChatBubble from '@/components/ChatBubble';
+import LearningPanel from '@/components/LearningPanel';
 import SqlConfirmation from '@/components/SqlConfirmation';
 import RawSqlPanel from '@/components/RawSqlPanel';
 
@@ -49,9 +54,12 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [confirmLoading, setConfirmLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'chat' | 'sql'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'sql' | 'learning'>('chat');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [queryHistory, setQueryHistory] = useState<QueryHistoryItem[]>([]);
+  const [skillCandidates, setSkillCandidates] = useState<SkillCandidate[]>([]);
+  const [publishedSkills, setPublishedSkills] = useState<PublishedSkill[]>([]);
+  const [learningLoading, setLearningLoading] = useState(false);
   const [schemaMsg, setSchemaMsg] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -71,9 +79,22 @@ export default function ChatPage() {
     } catch {}
   }, [connectionId]);
 
+  const loadLearning = useCallback(async () => {
+    if (!connectionId) return;
+    try {
+      const [candidates, published] = await Promise.all([
+        getSkillCandidates(connectionId, 'pending', 12),
+        getPublishedSkills(connectionId, 12),
+      ]);
+      setSkillCandidates(candidates);
+      setPublishedSkills(published);
+    } catch {}
+  }, [connectionId]);
+
   useEffect(() => {
     loadHistory();
-  }, [loadHistory]);
+    loadLearning();
+  }, [loadHistory, loadLearning]);
 
   // Auto-scroll
   useEffect(() => {
@@ -124,6 +145,7 @@ export default function ChatPage() {
         }
         if (data.task_id) setLastTaskId(data.task_id);
         loadHistory();
+        loadLearning();
       } else if (data.status === 'clarification_needed') {
         addMessage({ role: 'assistant', content: data.refined_query || 'Could you clarify your request?' });
       } else if (data.status === 'error') {
@@ -179,6 +201,7 @@ export default function ChatPage() {
         }
         if (data.task_id) setLastTaskId(data.task_id);
         loadHistory();
+        loadLearning();
       } else {
         addMessage({ role: 'error', content: data.error || 'Execution failed' });
       }
@@ -221,12 +244,20 @@ export default function ChatPage() {
 
   async function handleClearChat() {
     clearMessages();
-    try { await clearHistory(connectionId!); } catch {}
+    try {
+      await clearHistory(connectionId!);
+      await loadHistory();
+      await loadLearning();
+    } catch {}
   }
 
   async function handleNewConversation() {
     clearMessages();
-    try { await newConversation(connectionId!); } catch {}
+    try {
+      await newConversation(connectionId!);
+      await loadHistory();
+      await loadLearning();
+    } catch {}
   }
 
   async function handleRefreshSchema() {
@@ -240,6 +271,29 @@ export default function ChatPage() {
     setTimeout(() => setSchemaMsg(''), 4000);
   }
 
+  async function handleApproveSkill(
+    candidate: SkillCandidate,
+    payload?: { review_notes?: string; edited_title?: string; edited_instructions?: string },
+  ) {
+    setLearningLoading(true);
+    try {
+      await approveSkillCandidate(candidate.id, payload);
+      await loadLearning();
+    } finally {
+      setLearningLoading(false);
+    }
+  }
+
+  async function handleRejectSkill(candidate: SkillCandidate, reviewNotes = '') {
+    setLearningLoading(true);
+    try {
+      await rejectSkillCandidate(candidate.id, reviewNotes);
+      await loadLearning();
+    } finally {
+      setLearningLoading(false);
+    }
+  }
+
   function handleDisconnect() {
     disconnect();
     router.replace('/');
@@ -248,19 +302,24 @@ export default function ChatPage() {
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex h-screen overflow-hidden bg-gray-50">
+    <div className="relative flex h-screen overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(125,211,252,0.22),_transparent_34%),radial-gradient(circle_at_top_right,_rgba(251,191,36,0.18),_transparent_28%),linear-gradient(180deg,_#f8fafc_0%,_#eef2ff_100%)]">
       {/* ── Sidebar ─────────────────────────────────────────────── */}
       <aside
         className={`${
           sidebarOpen ? 'w-64' : 'w-0 overflow-hidden'
-        } transition-all duration-200 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col`}
+        } transition-all duration-200 flex-shrink-0 border-r border-white/60 bg-white/70 backdrop-blur-xl flex flex-col`}
       >
-        <div className="p-4 border-b">
+        <div className="border-b border-slate-200/70 p-4">
           <div className="flex items-center gap-2 mb-1">
-            <Bot className="w-5 h-5 text-blue-600" />
-            <span className="font-semibold text-sm">SQL Agent</span>
+            <div className="rounded-xl bg-sky-100 p-2 text-sky-700">
+              <Bot className="w-4 h-4" />
+            </div>
+            <div>
+              <span className="font-semibold text-sm text-slate-900">SQL Agent</span>
+              <p className="text-[11px] text-slate-500">Memory + skills + human review</p>
+            </div>
           </div>
-          <p className="text-xs text-gray-400 font-mono truncate">{connectedServer}</p>
+          <p className="text-xs text-slate-400 font-mono truncate mt-2">{connectedServer}</p>
         </div>
 
         <div className="p-3 space-y-1">
@@ -272,7 +331,20 @@ export default function ChatPage() {
         </div>
 
         {/* Query history */}
-        <div className="flex-1 overflow-y-auto p-3 border-t">
+        <div className="flex-1 overflow-y-auto border-t border-slate-200/70 p-3">
+          <div className="mb-3 rounded-2xl bg-gradient-to-br from-slate-900 via-slate-800 to-sky-900 p-4 text-white shadow-lg">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-200">Learning status</p>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+              <div className="rounded-xl bg-white/10 p-3">
+                <p className="text-sky-100/70">Pending skills</p>
+                <p className="mt-1 text-lg font-semibold">{skillCandidates.length}</p>
+              </div>
+              <div className="rounded-xl bg-white/10 p-3">
+                <p className="text-sky-100/70">Published</p>
+                <p className="mt-1 text-lg font-semibold">{publishedSkills.length}</p>
+              </div>
+            </div>
+          </div>
           <p className="text-xs font-semibold text-gray-500 mb-2">Recent queries</p>
           {queryHistory.length === 0 && (
             <p className="text-xs text-gray-400 italic">No queries yet</p>
@@ -289,29 +361,40 @@ export default function ChatPage() {
       {/* ── Main area ───────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <header className="flex items-center gap-3 px-4 py-2.5 bg-white border-b border-gray-200">
+        <header className="flex items-center gap-3 border-b border-white/60 bg-white/70 px-4 py-3 backdrop-blur-xl">
           <button
             onClick={() => setSidebarOpen((v) => !v)}
-            className="p-1 rounded-lg hover:bg-gray-100 text-gray-500"
+            className="rounded-xl p-2 text-slate-500 hover:bg-slate-100"
           >
             {sidebarOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
           </button>
-          <h1 className="font-semibold text-sm flex items-center gap-2">
-            🤖 SQL Agent
-          </h1>
+          <div>
+            <h1 className="font-semibold text-sm flex items-center gap-2 text-slate-900">
+              SQL Agent Studio
+            </h1>
+            <p className="text-xs text-slate-500">Query, review, teach, and publish reusable business skills</p>
+          </div>
           {/* Tabs */}
-          <div className="ml-auto flex gap-1 bg-gray-100 rounded-lg p-1">
+          <div className="ml-auto flex gap-1 rounded-2xl bg-slate-100 p-1">
             {(['chat', 'sql'] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
+                className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
                   activeTab === tab ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
                 {tab === 'chat' ? '💬 Chat' : '📝 Raw SQL'}
               </button>
             ))}
+            <button
+              onClick={() => setActiveTab('learning')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-medium transition-colors ${
+                activeTab === 'learning' ? 'bg-white shadow text-gray-900' : 'text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              🧠 Learning
+            </button>
           </div>
         </header>
 
@@ -319,10 +402,27 @@ export default function ChatPage() {
           <>
             {/* Messages area */}
             <div className="flex-1 overflow-y-auto thin-scroll p-4 space-y-4">
+              <div className="rounded-[28px] border border-white/70 bg-white/75 px-5 py-4 shadow-[0_20px_60px_rgba(15,23,42,0.05)] backdrop-blur-xl">
+                <div className="flex flex-wrap items-center gap-3">
+                  <span className="rounded-full bg-sky-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-700">
+                    Human-in-the-loop
+                  </span>
+                  <span className="rounded-full bg-emerald-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-700">
+                    Memory-aware
+                  </span>
+                  <span className="rounded-full bg-amber-100 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-amber-700">
+                    Skill publishing
+                  </span>
+                </div>
+                <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
+                  Ask a business question in natural language. The agent retrieves schema docs, similar successful SQL, and approved skills before drafting a query for your review.
+                </p>
+              </div>
               {chatMessages.length === 0 && (
-                <div className="flex flex-col items-center justify-center h-full text-gray-400">
-                  <Bot className="w-14 h-14 mb-3 text-gray-300" />
-                  <p className="text-sm">Ask a question about your database</p>
+                <div className="flex flex-col items-center justify-center rounded-[28px] border border-dashed border-slate-300 bg-white/60 px-6 py-16 text-gray-400">
+                  <Bot className="mb-3 h-14 w-14 text-slate-300" />
+                  <p className="text-sm font-medium text-slate-500">Ask a question about your database</p>
+                  <p className="mt-2 text-center text-sm text-slate-400">A good starting prompt is “Find patients admitted with heart failure in 2024.”</p>
                 </div>
               )}
               {chatMessages.map((msg) => (
@@ -350,7 +450,7 @@ export default function ChatPage() {
             </div>
 
             {/* Input */}
-            <div className="bg-white border-t border-gray-200 px-4 py-3">
+            <div className="border-t border-white/60 bg-white/70 px-4 py-3 backdrop-blur-xl">
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -363,12 +463,12 @@ export default function ChatPage() {
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Ask a question about your database…"
                   disabled={sending}
-                  className="flex-1 rounded-xl border border-gray-300 px-4 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-gray-50"
+                  className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-sky-400 focus:ring-4 focus:ring-sky-100 disabled:bg-gray-50"
                 />
                 <button
                   type="submit"
                   disabled={sending || !input.trim()}
-                  className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+                  className="flex items-center gap-1.5 rounded-2xl bg-slate-900 px-4 py-3 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:opacity-50"
                 >
                   {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
                   Send
@@ -376,8 +476,16 @@ export default function ChatPage() {
               </form>
             </div>
           </>
-        ) : (
+        ) : activeTab === 'sql' ? (
           <RawSqlPanel connectionId={connectionId!} initialSql={lastSqlQuery} onSqlChange={setLastSqlQuery} />
+        ) : (
+          <LearningPanel
+            candidates={skillCandidates}
+            publishedSkills={publishedSkills}
+            loading={learningLoading}
+            onApprove={handleApproveSkill}
+            onReject={handleRejectSkill}
+          />
         )}
       </div>
     </div>

@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 
 from database.connection import DatabaseConnection
 from database.schema_storage import SchemaStorage
+from learning.pattern_detector import maybe_create_skill_candidate
+from skills.skill_router import format_skills_for_prompt, retrieve_relevant_skills
 from table_docs.table_doc_updater import update_table_docs_for_query
 
 from context.manager import ContextWindowManager
@@ -144,11 +146,21 @@ class Orchestrator:
                 "agent_trace": self._agent_trace(ctx),
             }
 
+        matched_skills = retrieve_relevant_skills(
+            self.conversation_store,
+            connection_id=connection_id,
+            user_query=user_message,
+            selected_tables=ctx.selected_tables,
+        )
+        ctx.matched_skills = matched_skills
+
         sql_result = self.sql_agent.run(
             ctx,
             conversation_context=conversation_context,
             previous_sql=previous_sql,
             similar_examples=similar_examples,
+            matched_skills=matched_skills,
+            skills_prompt=format_skills_for_prompt(matched_skills),
         )
         if not sql_result.success:
             return self._error_response(ctx, sql_result.error or "SQL generation failed.")
@@ -161,6 +173,18 @@ class Orchestrator:
         ctx.needs_confirmation = True
         ctx.confirmation_message = self._build_confirmation_message(validation_result)
         self._pending_tasks[ctx.task_id] = ctx
+        self.conversation_store.add_query_attempt(
+            connection_id=ctx.connection_id,
+            conversation_id=conversation_id,
+            task_id=ctx.task_id,
+            user_query=ctx.user_query,
+            generated_sql=ctx.generated_sql,
+            status="awaiting_confirmation",
+            metadata={
+                "selected_tables": ctx.selected_tables,
+                "matched_skill_ids": [skill.get("id") for skill in matched_skills],
+            },
+        )
         self._save_task_snapshot(ctx, conversation_id)
 
         review_msg = "I've generated SQL for your request. Please review or modify it before execution."
@@ -202,22 +226,44 @@ class Orchestrator:
             return {"status": "error", "error": f"Task '{task_id}' not found."}
 
         if modified_sql and modified_sql.strip():
+            original_sql = ctx.generated_sql or ""
             ctx.generated_sql = modified_sql.strip()
             ctx.add_message(
                 "agent",
                 "User provided modified SQL for execution.",
                 agent=AgentRole.ORCHESTRATOR.value,
             )
+            if original_sql and original_sql.strip() != ctx.generated_sql:
+                self.conversation_store.add_query_correction(
+                    connection_id=ctx.connection_id,
+                    conversation_id=self.conversation_store.get_or_create_conversation(ctx.connection_id),
+                    task_id=ctx.task_id,
+                    user_query=ctx.user_query,
+                    original_sql=original_sql,
+                    corrected_sql=ctx.generated_sql,
+                    metadata={"selected_tables": ctx.selected_tables},
+                )
             validation_result = self.validation_agent.run(ctx)
             if not validation_result.success:
                 self._save_task_snapshot(
                     ctx,
                     self.conversation_store.get_or_create_conversation(ctx.connection_id),
                 )
+                self.conversation_store.update_query_attempt(
+                    ctx.task_id,
+                    status="validation_failed",
+                    generated_sql=ctx.generated_sql,
+                    error=validation_result.error,
+                )
                 return {"status": "error", "error": validation_result.error or "Modified SQL validation failed."}
 
         ctx.status = TaskStatus.CONFIRMED
         conversation_id = self.conversation_store.get_or_create_conversation(ctx.connection_id)
+        self.conversation_store.update_query_attempt(
+            ctx.task_id,
+            status="confirmed",
+            generated_sql=ctx.generated_sql,
+        )
         self._save_task_snapshot(ctx, conversation_id)
 
         result = self._execute_and_finalize(
@@ -239,6 +285,12 @@ class Orchestrator:
 
         conversation_id = self.conversation_store.get_or_create_conversation(ctx.connection_id)
         self._persist_assistant_message(ctx.connection_id, conversation_id, note, ctx)
+        self.conversation_store.update_query_attempt(
+            ctx.task_id,
+            status="rejected",
+            generated_sql=ctx.generated_sql,
+            error=note,
+        )
         self.conversation_store.delete_task_state(task_id)
         self._pending_tasks.pop(task_id, None)
         return {
@@ -271,6 +323,41 @@ class Orchestrator:
     def get_query_history(self, connection_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         return self.conversation_store.get_query_history(connection_id, limit=limit)
 
+    def list_skill_candidates(
+        self,
+        connection_id: str,
+        status: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        return self.conversation_store.list_skill_candidates(connection_id, status=status, limit=limit)
+
+    def list_published_skills(self, connection_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        return self.conversation_store.list_published_skills(connection_id, limit=limit)
+
+    def approve_skill_candidate(
+        self,
+        candidate_id: int,
+        review_notes: str = "",
+        edited_title: Optional[str] = None,
+        edited_instructions: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        skill_id = self.conversation_store.publish_skill_candidate(
+            candidate_id,
+            review_notes=review_notes,
+            edited_title=edited_title,
+            edited_instructions=edited_instructions,
+        )
+        if skill_id is None:
+            return {"status": "error", "error": f"Skill candidate '{candidate_id}' not found."}
+        return {"status": "completed", "candidate_id": candidate_id, "published_skill_id": skill_id}
+
+    def reject_skill_candidate(self, candidate_id: int, review_notes: str = "") -> Dict[str, Any]:
+        candidate = self.conversation_store.get_skill_candidate(candidate_id)
+        if not candidate:
+            return {"status": "error", "error": f"Skill candidate '{candidate_id}' not found."}
+        self.conversation_store.reject_skill_candidate(candidate_id, review_notes=review_notes)
+        return {"status": "completed", "candidate_id": candidate_id}
+
     def clear_conversation(self, connection_id: str) -> None:
         self.conversation_store.clear_conversation(connection_id)
         self._context_managers.pop(connection_id, None)
@@ -301,11 +388,23 @@ class Orchestrator:
     ) -> Dict[str, Any]:
         execution_result = self.execution_agent.run(ctx, db_connection=db_connection)
         if not execution_result.success:
+            self.conversation_store.update_query_attempt(
+                ctx.task_id,
+                status="execution_failed",
+                generated_sql=ctx.generated_sql,
+                error=execution_result.error,
+            )
             self._save_task_snapshot(ctx, conversation_id)
             return self._error_response(ctx, execution_result.error or "Execution failed.")
 
         explain_result = self.explanation_agent.run(ctx)
         if not explain_result.success:
+            self.conversation_store.update_query_attempt(
+                ctx.task_id,
+                status="explanation_failed",
+                generated_sql=ctx.generated_sql,
+                error=explain_result.error,
+            )
             self._save_task_snapshot(ctx, conversation_id)
             return self._error_response(ctx, explain_result.error or "Explanation failed.")
 
@@ -323,8 +422,38 @@ class Orchestrator:
             metadata={
                 "selected_tables": ctx.selected_tables,
                 "intent": ctx.intent.value if ctx.intent else None,
+                "matched_skills": [
+                    {
+                        "id": skill.get("id"),
+                        "title": skill.get("title"),
+                        "match_score": skill.get("match_score"),
+                    }
+                    for skill in ctx.matched_skills
+                ],
             },
         )
+        self.conversation_store.update_query_attempt(
+            ctx.task_id,
+            status="completed",
+            generated_sql=ctx.generated_sql,
+            metadata={
+                "selected_tables": ctx.selected_tables,
+                "matched_skill_ids": [skill.get("id") for skill in ctx.matched_skills],
+            },
+        )
+        for skill in ctx.matched_skills:
+            skill_id = skill.get("id")
+            if skill_id is None:
+                continue
+            self.conversation_store.add_skill_usage(
+                connection_id=ctx.connection_id,
+                published_skill_id=int(skill_id),
+                user_query=ctx.user_query,
+                outcome="completed",
+                task_id=ctx.task_id,
+                match_score=skill.get("match_score"),
+                metadata={"selected_tables": ctx.selected_tables},
+            )
 
         schema = self.schema_storage.load_schema(ctx.connection_id)
         if schema and ctx.generated_sql:
@@ -341,6 +470,18 @@ class Orchestrator:
                 )
             except Exception as exc:
                 logger.warning("Failed to update table docs for task %s: %s", ctx.task_id, exc)
+
+        try:
+            maybe_create_skill_candidate(
+                self.conversation_store,
+                connection_id=ctx.connection_id,
+                task_id=ctx.task_id,
+                user_query=ctx.user_query,
+                generated_sql=ctx.generated_sql or "",
+                selected_tables=ctx.selected_tables,
+            )
+        except Exception as exc:
+            logger.warning("Failed to detect skill candidate for task %s: %s", ctx.task_id, exc)
 
         assistant_text = ctx.explanation or "Query completed successfully."
         self._persist_assistant_message(ctx.connection_id, conversation_id, assistant_text, ctx)
@@ -463,6 +604,7 @@ class Orchestrator:
             "execution_result": ctx.execution_result,
             "explanation": ctx.explanation,
             "visualization_config": ctx.visualization_config,
+            "matched_skills": ctx.matched_skills,
             "status": ctx.status.value,
             "error": ctx.error,
             "needs_confirmation": ctx.needs_confirmation,
@@ -511,6 +653,7 @@ class Orchestrator:
         ctx.execution_result = payload.get("execution_result")
         ctx.explanation = payload.get("explanation")
         ctx.visualization_config = payload.get("visualization_config")
+        ctx.matched_skills = payload.get("matched_skills", [])
         ctx.error = payload.get("error")
         ctx.needs_confirmation = bool(payload.get("needs_confirmation", False))
         ctx.confirmation_message = payload.get("confirmation_message")
