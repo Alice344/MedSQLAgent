@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -14,6 +15,8 @@ from .merge_rules import (
     normalize_query_text,
 )
 from .sql_table_extractor import extract_schema_tables
+
+logger = logging.getLogger(__name__)
 
 
 def _render_common_joins(table: Dict[str, Any], foreign_keys: Iterable[Dict[str, Any]]) -> List[str]:
@@ -136,6 +139,11 @@ def update_table_docs_for_query(
 
     touched: List[Path] = []
     matched_tables = extract_schema_tables(sql_query, schema.get("tables", []))
+    logger.info(
+        "Updating table docs for NL=%r matched_tables=%s",
+        natural_language_query[:160],
+        [str(table.get("full_name")) for table in matched_tables],
+    )
     for table in matched_tables:
         path = docs_dir / f"{table['name']}.md"
         if path.exists():
@@ -145,5 +153,13 @@ def update_table_docs_for_query(
             content = _render_new_doc(table, schema.get("foreign_keys", []), natural_language_query)
             path.write_text(content, encoding="utf-8")
         touched.append(path)
+
+    if not touched:
+        logger.warning(
+            "No table docs were updated for NL=%r; SQL table extraction found no matching schema tables.",
+            natural_language_query[:160],
+        )
+    else:
+        logger.info("Touched table docs: %s", [str(path) for path in touched])
 
     return touched

@@ -17,11 +17,13 @@ logger = logging.getLogger(__name__)
 
 class SQLGeneratorAgent(BaseAgent):
     role = AgentRole.SQL_GENERATOR
+    HIGH_CONFIDENCE_THRESHOLD = 0.72
 
     def run(self, ctx: TaskContext, **kwargs: Any) -> AgentResult:
         conversation_context: str = kwargs.get("conversation_context", "")
         previous_sql: Optional[str] = kwargs.get("previous_sql", None)
-        similar_examples: List[Dict[str, str]] = kwargs.get("similar_examples", [])
+        similar_examples: List[Dict[str, Any]] = kwargs.get("similar_examples", [])
+        high_confidence_example = self._pick_high_confidence_example(similar_examples)
 
         system_prompt = (
             "You are an expert SQL developer specialising in Microsoft SQL Server (T-SQL).\n"
@@ -35,6 +37,7 @@ class SQLGeneratorAgent(BaseAgent):
             "6. Return ONLY the SQL query — no markdown, no explanation.\n"
             "7. If the query is ambiguous, make reasonable assumptions using only the provided schema.\n"
             "8. For follow-up queries, build on the previous SQL shown in the conversation.\n"
+            "9. When a highly similar successful historical example is provided, strongly prefer its query pattern, joins, and filters unless the current request clearly requires a change.\n"
         )
 
         # Build user message with optional prior context
@@ -43,11 +46,27 @@ class SQLGeneratorAgent(BaseAgent):
             parts.append(f"[Prior conversation]\n{conversation_context}\n")
         if previous_sql:
             parts.append(f"[Previous SQL query]\n{previous_sql}\n")
+        if high_confidence_example:
+            parts.append(
+                "[Primary historical example - highly similar, prefer this SQL pattern unless the user asked for a meaningful change]"
+            )
+            parts.append(
+                f"Similarity score: {high_confidence_example.get('score', 0.0):.3f}"
+            )
+            parts.append(f"Matched NL:\n{high_confidence_example.get('user_query', '')}")
+            parts.append(f"Matched SQL:\n{high_confidence_example.get('generated_sql', '')}\n")
         if similar_examples:
             parts.append("[Similar historical NL-to-SQL examples]")
-            for idx, example in enumerate(similar_examples, start=1):
-                parts.append(f"Example {idx} NL:\n{example.get('user_query', '')}")
-                parts.append(f"Example {idx} SQL:\n{example.get('generated_sql', '')}\n")
+            example_number = 1
+            for example in similar_examples:
+                if high_confidence_example and example is high_confidence_example:
+                    continue
+                parts.append(f"Example {example_number} NL:\n{example.get('user_query', '')}")
+                parts.append(
+                    f"Example {example_number} SQL (score={example.get('score', 0.0):.3f}, strength={example.get('match_strength', 'low')}):\n"
+                    f"{example.get('generated_sql', '')}\n"
+                )
+                example_number += 1
         parts.append(
             f"Database Schema (use ONLY these table/column names):\n{ctx.formatted_schema}\n"
         )
@@ -55,13 +74,19 @@ class SQLGeneratorAgent(BaseAgent):
         parts.append("\nGenerate the SQL query:")
 
         user_prompt = "\n".join(parts)
+        logger.info(
+            "Generating SQL for task=%s with %s similar examples (high_confidence=%s)",
+            ctx.task_id,
+            len(similar_examples),
+            round(high_confidence_example.get("score", 0.0), 3) if high_confidence_example else None,
+        )
 
         raw = self._chat(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.1,
+            temperature=0.0 if high_confidence_example else 0.1,
             max_tokens=1500,
         )
 
@@ -95,3 +120,16 @@ class SQLGeneratorAgent(BaseAgent):
         if sql.endswith("```"):
             sql = sql[: -3]
         return sql.strip()
+
+    @classmethod
+    def _pick_high_confidence_example(
+        cls, similar_examples: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        if not similar_examples:
+            return None
+        top = similar_examples[0]
+        try:
+            score = float(top.get("score", 0.0))
+        except (TypeError, ValueError):
+            return None
+        return top if score >= cls.HIGH_CONFIDENCE_THRESHOLD else None
