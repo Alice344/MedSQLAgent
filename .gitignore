@@ -67,6 +67,7 @@ docs/caboodle/
 # Large data files
 pci_classified_output.csv
 *.csv
+*.ipynb
 
 # Database
 *.db
