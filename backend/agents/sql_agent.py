@@ -23,6 +23,8 @@ class SQLGeneratorAgent(BaseAgent):
         conversation_context: str = kwargs.get("conversation_context", "")
         previous_sql: Optional[str] = kwargs.get("previous_sql", None)
         similar_examples: List[Dict[str, Any]] = kwargs.get("similar_examples", [])
+        matched_skills: List[Dict[str, Any]] = kwargs.get("matched_skills", [])
+        skills_prompt: str = kwargs.get("skills_prompt", "")
         high_confidence_example = self._pick_high_confidence_example(similar_examples)
 
         system_prompt = (
@@ -38,6 +40,7 @@ class SQLGeneratorAgent(BaseAgent):
             "7. If the query is ambiguous, make reasonable assumptions using only the provided schema.\n"
             "8. For follow-up queries, build on the previous SQL shown in the conversation.\n"
             "9. When a highly similar successful historical example is provided, strongly prefer its query pattern, joins, and filters unless the current request clearly requires a change.\n"
+            "10. Published skills are manually approved business patterns; treat them as higher-priority guidance than generic few-shot examples.\n"
         )
 
         # Build user message with optional prior context
@@ -46,6 +49,9 @@ class SQLGeneratorAgent(BaseAgent):
             parts.append(f"[Prior conversation]\n{conversation_context}\n")
         if previous_sql:
             parts.append(f"[Previous SQL query]\n{previous_sql}\n")
+        if skills_prompt:
+            parts.append("[Published skills relevant to this request]")
+            parts.append(skills_prompt)
         if high_confidence_example:
             parts.append(
                 "[Primary historical example - highly similar, prefer this SQL pattern unless the user asked for a meaningful change]"
@@ -80,6 +86,19 @@ class SQLGeneratorAgent(BaseAgent):
             len(similar_examples),
             round(high_confidence_example.get("score", 0.0), 3) if high_confidence_example else None,
         )
+        if matched_skills:
+            logger.info(
+                "Task=%s matched published skills=%s",
+                ctx.task_id,
+                [
+                    {
+                        "id": skill.get("id"),
+                        "title": skill.get("title"),
+                        "match_score": round(skill.get("match_score", 0.0), 3),
+                    }
+                    for skill in matched_skills
+                ],
+            )
 
         raw = self._chat(
             messages=[

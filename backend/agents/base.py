@@ -92,6 +92,7 @@ class TaskContext:
     execution_result: Optional[Dict[str, Any]] = None
     explanation: Optional[str] = None
     visualization_config: Optional[Dict[str, Any]] = None
+    matched_skills: List[Dict[str, Any]] = field(default_factory=list)
 
     # Status
     status: TaskStatus = TaskStatus.PENDING
@@ -127,6 +128,7 @@ class TaskContext:
             "validation_result": self.validation_result,
             "execution_result": self.execution_result,
             "explanation": self.explanation,
+            "matched_skills": self.matched_skills,
             "status": self.status.value,
             "error": self.error,
             "needs_confirmation": self.needs_confirmation,

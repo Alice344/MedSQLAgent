@@ -587,6 +587,13 @@ class AgentRejectRequest(BaseModel):
     reason: str = ""
 
 
+class SkillReviewRequest(BaseModel):
+    candidate_id: int
+    review_notes: str = ""
+    edited_title: Optional[str] = None
+    edited_instructions: Optional[str] = None
+
+
 @app.post("/api/agent/chat")
 def agent_chat(request: AgentChatRequest):
     """
@@ -704,6 +711,42 @@ async def agent_query_history(connection_id: str, limit: int = 20):
     return orchestrator.get_query_history(connection_id, limit=limit)
 
 
+@app.get("/api/agent/skill-candidates/{connection_id}")
+async def agent_skill_candidates(connection_id: str, status: Optional[str] = None, limit: int = 20):
+    """List skill candidates for manual review."""
+    return orchestrator.list_skill_candidates(connection_id, status=status, limit=limit)
+
+
+@app.get("/api/agent/published-skills/{connection_id}")
+async def agent_published_skills(connection_id: str, limit: int = 20):
+    """List manually approved skills."""
+    return orchestrator.list_published_skills(connection_id, limit=limit)
+
+
+@app.post("/api/agent/skill-candidates/approve")
+async def agent_approve_skill_candidate(request: SkillReviewRequest):
+    result = orchestrator.approve_skill_candidate(
+        request.candidate_id,
+        review_notes=request.review_notes,
+        edited_title=request.edited_title,
+        edited_instructions=request.edited_instructions,
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@app.post("/api/agent/skill-candidates/reject")
+async def agent_reject_skill_candidate(request: SkillReviewRequest):
+    result = orchestrator.reject_skill_candidate(
+        request.candidate_id,
+        review_notes=request.review_notes,
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
 @app.delete("/api/agent/history/{connection_id}")
 async def agent_clear_history(connection_id: str):
     """Clear all conversation history for a connection."""
@@ -742,6 +785,10 @@ async def root():
             "agent_reject": "POST /api/agent/reject",
             "agent_history": "GET /api/agent/history/{connection_id}",
             "agent_query_history": "GET /api/agent/query-history/{connection_id}",
+            "agent_skill_candidates": "GET /api/agent/skill-candidates/{connection_id}",
+            "agent_published_skills": "GET /api/agent/published-skills/{connection_id}",
+            "agent_approve_skill_candidate": "POST /api/agent/skill-candidates/approve",
+            "agent_reject_skill_candidate": "POST /api/agent/skill-candidates/reject",
             "agent_clear_history": "DELETE /api/agent/history/{connection_id}",
             "agent_new_conversation": "POST /api/agent/new-conversation/{connection_id}",
         }
