@@ -4,7 +4,7 @@ MedSQLAgent is a human-in-the-loop SQL agent for complex healthcare analytics wo
 
 The goal is not just "generate SQL." The goal is to build an agent that can steadily absorb domain knowledge without losing safety.
 
-![Alt text](/Users/alice/MedSQLAgent/illustration.png "Optional title")
+![SQL Agent illustration](illustration.png)
 
 ## What It Does
 
